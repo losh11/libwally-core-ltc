@@ -65,16 +65,25 @@ static bool child_is_hardened(uint32_t child_num)
 
 static bool version_is_valid(uint32_t ver, uint32_t flags)
 {
-    if (ver == BIP32_VER_MAIN_PRIVATE || ver == BIP32_VER_TEST_PRIVATE)
+    if (ver == BIP32_VER_MAIN_PRIVATE || ver == BIP32_VER_TEST_PRIVATE ||
+        ver == BIP32_VER_LTC_MAIN_PRIVATE || ver == BIP32_VER_LTC_TEST_PRIVATE)
         return true;
 
     return flags == BIP32_FLAG_KEY_PUBLIC &&
-           (ver == BIP32_VER_MAIN_PUBLIC || ver == BIP32_VER_TEST_PUBLIC);
+           (ver == BIP32_VER_MAIN_PUBLIC || ver == BIP32_VER_TEST_PUBLIC ||
+            ver == BIP32_VER_LTC_MAIN_PUBLIC || ver == BIP32_VER_LTC_TEST_PUBLIC);
 }
 
 static bool version_is_mainnet(uint32_t ver)
 {
-    return ver == BIP32_VER_MAIN_PRIVATE || ver == BIP32_VER_MAIN_PUBLIC;
+    return ver == BIP32_VER_MAIN_PRIVATE || ver == BIP32_VER_MAIN_PUBLIC ||
+           ver == BIP32_VER_LTC_MAIN_PRIVATE || ver == BIP32_VER_LTC_MAIN_PUBLIC;
+}
+
+static bool version_is_litecoin(uint32_t ver)
+{
+    return ver == BIP32_VER_LTC_MAIN_PRIVATE || ver == BIP32_VER_LTC_MAIN_PUBLIC ||
+           ver == BIP32_VER_LTC_TEST_PRIVATE || ver == BIP32_VER_LTC_TEST_PUBLIC;
 }
 
 static bool is_hardened_indicator(char c, bool allow_upper, uint32_t *features)
@@ -511,6 +520,10 @@ int bip32_key_serialize(const struct ext_key *hdkey, uint32_t flags,
             tmp32 = BIP32_VER_MAIN_PUBLIC;
         else if (tmp32 == BIP32_VER_TEST_PRIVATE)
             tmp32 = BIP32_VER_TEST_PUBLIC;
+        else if (tmp32 == BIP32_VER_LTC_MAIN_PRIVATE)
+            tmp32 = BIP32_VER_LTC_MAIN_PUBLIC;
+        else if (tmp32 == BIP32_VER_LTC_TEST_PRIVATE)
+            tmp32 = BIP32_VER_LTC_TEST_PUBLIC;
     }
     tmp32_be = cpu_to_be32(tmp32);
     out = copy_out(out, &tmp32_be, sizeof(tmp32_be));
@@ -566,7 +579,9 @@ int bip32_key_unserialize(const unsigned char *bytes, size_t bytes_len,
 
     if (bytes[0] == BIP32_FLAG_KEY_PRIVATE) {
         if (key_out->version == BIP32_VER_MAIN_PUBLIC ||
-            key_out->version == BIP32_VER_TEST_PUBLIC)
+            key_out->version == BIP32_VER_TEST_PUBLIC ||
+            key_out->version == BIP32_VER_LTC_MAIN_PUBLIC ||
+            key_out->version == BIP32_VER_LTC_TEST_PUBLIC)
             return wipe_key_fail(key_out); /* Private key data in public key */
 
         copy_in(key_out->priv_key, bytes, sizeof(key_out->priv_key));
@@ -574,7 +589,9 @@ int bip32_key_unserialize(const unsigned char *bytes, size_t bytes_len,
             return wipe_key_fail(key_out);
     } else {
         if (key_out->version == BIP32_VER_MAIN_PRIVATE ||
-            key_out->version == BIP32_VER_TEST_PRIVATE)
+            key_out->version == BIP32_VER_TEST_PRIVATE ||
+            key_out->version == BIP32_VER_LTC_MAIN_PRIVATE ||
+            key_out->version == BIP32_VER_LTC_TEST_PRIVATE)
             return wipe_key_fail(key_out); /* Public key data in private key */
 
         copy_in(key_out->pub_key, bytes, sizeof(key_out->pub_key));
@@ -729,13 +746,19 @@ int bip32_key_from_parent(const struct ext_key *hdkey, uint32_t child_num,
 #endif /* BUILD_ELEMENTS */
 
     if (derive_private) {
-        if (version_is_mainnet(hdkey->version))
+        if (version_is_litecoin(hdkey->version))
+            key_out->version = version_is_mainnet(hdkey->version)
+                ? BIP32_VER_LTC_MAIN_PRIVATE : BIP32_VER_LTC_TEST_PRIVATE;
+        else if (version_is_mainnet(hdkey->version))
             key_out->version = BIP32_VER_MAIN_PRIVATE;
         else
             key_out->version = BIP32_VER_TEST_PRIVATE;
 
     } else {
-        if (version_is_mainnet(hdkey->version))
+        if (version_is_litecoin(hdkey->version))
+            key_out->version = version_is_mainnet(hdkey->version)
+                ? BIP32_VER_LTC_MAIN_PUBLIC : BIP32_VER_LTC_TEST_PUBLIC;
+        else if (version_is_mainnet(hdkey->version))
             key_out->version = BIP32_VER_MAIN_PUBLIC;
         else
             key_out->version = BIP32_VER_TEST_PUBLIC;
@@ -982,11 +1005,15 @@ int bip32_key_init(uint32_t version, uint32_t depth, uint32_t child_num,
     switch (version) {
     case BIP32_VER_MAIN_PRIVATE:
     case BIP32_VER_TEST_PRIVATE:
+    case BIP32_VER_LTC_MAIN_PRIVATE:
+    case BIP32_VER_LTC_TEST_PRIVATE:
         if (!priv_key || priv_key_len != key_size(priv_key) - 1)
             return WALLY_EINVAL;
         break;
     case BIP32_VER_MAIN_PUBLIC:
     case BIP32_VER_TEST_PUBLIC:
+    case BIP32_VER_LTC_MAIN_PUBLIC:
+    case BIP32_VER_LTC_TEST_PUBLIC:
         if (!pub_key || pub_key_len != key_size(pub_key))
             return WALLY_EINVAL;
         break;
@@ -1008,13 +1035,15 @@ int bip32_key_init(uint32_t version, uint32_t depth, uint32_t child_num,
     key_out->child_num = child_num;
 
     memcpy(key_out->chain_code, chain_code, key_size(chain_code));
-    if (priv_key && version != BIP32_VER_MAIN_PUBLIC && version != BIP32_VER_TEST_PUBLIC)
+    if (priv_key && version != BIP32_VER_MAIN_PUBLIC && version != BIP32_VER_TEST_PUBLIC &&
+        version != BIP32_VER_LTC_MAIN_PUBLIC && version != BIP32_VER_LTC_TEST_PUBLIC)
         memcpy(key_out->priv_key + 1, priv_key, key_size(priv_key) - 1);
     else
         key_out->priv_key[0] = BIP32_FLAG_KEY_PUBLIC;
     if (pub_key)
         memcpy(key_out->pub_key, pub_key, key_size(pub_key));
-    else if (version == BIP32_VER_MAIN_PRIVATE || version == BIP32_VER_TEST_PRIVATE) {
+    else if (version == BIP32_VER_MAIN_PRIVATE || version == BIP32_VER_TEST_PRIVATE ||
+             version == BIP32_VER_LTC_MAIN_PRIVATE || version == BIP32_VER_LTC_TEST_PRIVATE) {
         /* Compute the public key if not given */
         int ret = key_compute_pub_key(key_out);
         if (ret != WALLY_OK) {

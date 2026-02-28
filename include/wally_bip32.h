@@ -54,6 +54,10 @@ extern "C" {
 #define BIP32_VER_MAIN_PRIVATE 0x0488ADE4 /** Mainnet, private key */
 #define BIP32_VER_TEST_PUBLIC  0x043587CF /** Testnet, public key */
 #define BIP32_VER_TEST_PRIVATE 0x04358394 /** Testnet, private key */
+#define BIP32_VER_LTC_MAIN_PUBLIC  0x019da462 /** Litecoin mainnet (Ltub), public key */
+#define BIP32_VER_LTC_MAIN_PRIVATE 0x019d9cfe /** Litecoin mainnet (Ltpv), private key */
+#define BIP32_VER_LTC_TEST_PUBLIC  0x0436f6e1 /** Litecoin testnet (ttub), public key */
+#define BIP32_VER_LTC_TEST_PRIVATE 0x0436ef7d /** Litecoin testnet (ttpv), private key */
 
 /*** path-feature-flags BIP32 path feature flags */
 #define BIP32_PATH_LEN_MASK        0x000000ff /** Mask for the path length in bits 0-7 */
