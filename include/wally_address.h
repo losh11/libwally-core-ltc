@@ -24,6 +24,9 @@ struct ext_key;
 #define WALLY_NETWORK_LIQUID 0x03 /** Liquid v1 */
 #define WALLY_NETWORK_LIQUID_REGTEST 0x04 /** Liquid v1 regtest */
 #define WALLY_NETWORK_LIQUID_TESTNET 0x05 /** Liquid v1 testnet */
+#define WALLY_NETWORK_LITECOIN 0x06 /** Litecoin mainnet */
+#define WALLY_NETWORK_LITECOIN_TESTNET 0x07 /** Litecoin testnet */
+#define WALLY_NETWORK_LITECOIN_REGTEST 0x08 /** Litecoin regtest */
 
 #define WALLY_ADDRESS_TYPE_P2PKH 0x01       /** P2PKH address ("1...") */
 #define WALLY_ADDRESS_TYPE_P2SH_P2WPKH 0x02 /** P2SH-P2WPKH wrapped SegWit address ("3...") */
@@ -40,8 +43,12 @@ struct ext_key;
 #define WALLY_ADDRESS_VERSION_P2SH_LIQUID 0x27 /** P2SH address on liquid v1 */
 #define WALLY_ADDRESS_VERSION_P2SH_LIQUID_REGTEST 0x4B /** P2SH address on liquid v1 regtest */
 #define WALLY_ADDRESS_VERSION_P2SH_LIQUID_TESTNET 0x13 /** P2SH address on liquid v1 testnet */
+#define WALLY_ADDRESS_VERSION_P2PKH_LITECOIN 0x30 /** P2PKH address on litecoin */
+#define WALLY_ADDRESS_VERSION_P2SH_LITECOIN 0x32 /** P2SH address on litecoin */
+#define WALLY_ADDRESS_VERSION_P2SH_LITECOIN_TESTNET 0x3A /** P2SH address on litecoin testnet */
 #define WALLY_ADDRESS_VERSION_WIF_MAINNET 0x80 /** Wallet Import Format on mainnet */
 #define WALLY_ADDRESS_VERSION_WIF_TESTNET 0xEF /** Wallet Import Format on testnet */
+#define WALLY_ADDRESS_VERSION_WIF_LITECOIN 0xB0 /** Wallet Import Format on litecoin */
 
 #define WALLY_SEGWIT_ADDRESS_PUBKEY_MAX_LEN 42 /** OP_[0-16] OP_PUSH_N [up-to-40-bytes witprog] */
 #define WALLY_ADDRESS_PUBKEY_MAX_LEN 25

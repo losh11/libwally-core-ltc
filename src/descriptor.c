@@ -183,6 +183,33 @@ static const struct addr_ver_t g_address_versions[] = {
         { 'e', 'r', 't', '\0', '\0' },
         { 'e', 'l', '\0', '\0' }
     },
+    {
+        WALLY_NETWORK_LITECOIN,
+        WALLY_ADDRESS_VERSION_P2PKH_LITECOIN,
+        WALLY_ADDRESS_VERSION_P2SH_LITECOIN,
+        WALLY_ADDRESS_VERSION_WIF_LITECOIN,
+        0,
+        { 'l', 't', 'c', '\0', '\0' },
+        { '\0', '\0', '\0', '\0' }
+    },
+    {
+        WALLY_NETWORK_LITECOIN_TESTNET,
+        WALLY_ADDRESS_VERSION_P2PKH_TESTNET,
+        WALLY_ADDRESS_VERSION_P2SH_LITECOIN_TESTNET,
+        WALLY_ADDRESS_VERSION_WIF_TESTNET,
+        0,
+        { 't', 'l', 't', 'c', '\0' },
+        { '\0', '\0', '\0', '\0' }
+    },
+    {   /* Litecoin regtest. This must remain immediately after WALLY_NETWORK_LITECOIN_TESTNET */
+        WALLY_NETWORK_LITECOIN_REGTEST,
+        WALLY_ADDRESS_VERSION_P2PKH_TESTNET,
+        WALLY_ADDRESS_VERSION_P2SH_LITECOIN_TESTNET,
+        WALLY_ADDRESS_VERSION_WIF_TESTNET,
+        0,
+        { 'r', 'l', 't', 'c', '\0' },
+        { '\0', '\0', '\0', '\0' }
+    },
 };
 
 /* A node in a parsed miniscript expression */
@@ -276,6 +303,9 @@ static const struct addr_ver_t *addr_ver_from_version(
                 /* Mismatch on caller provided network */
                 if (addr_ver->network == WALLY_NETWORK_BITCOIN_TESTNET &&
                     expected->network == WALLY_NETWORK_BITCOIN_REGTEST)
+                    ++addr_ver; /* testnet/regtest use the same versions; use regtest */
+                else if (addr_ver->network == WALLY_NETWORK_LITECOIN_TESTNET &&
+                         expected->network == WALLY_NETWORK_LITECOIN_REGTEST)
                     ++addr_ver; /* testnet/regtest use the same versions; use regtest */
                 else
                     return NULL; /* Mismatch on provided network: Not found */
@@ -2473,9 +2503,12 @@ static int analyze_miniscript_key(ms_ctx *ctx, uint32_t flags,
 
     if (ctx->addr_ver) {
         const bool main_key = extkey.version == BIP32_VER_MAIN_PUBLIC ||
-                              extkey.version == BIP32_VER_MAIN_PRIVATE;
+                              extkey.version == BIP32_VER_MAIN_PRIVATE ||
+                              extkey.version == BIP32_VER_LTC_MAIN_PUBLIC ||
+                              extkey.version == BIP32_VER_LTC_MAIN_PRIVATE;
         const bool main_net = ctx->addr_ver->network == WALLY_NETWORK_BITCOIN_MAINNET ||
-                              ctx->addr_ver->network == WALLY_NETWORK_LIQUID;
+                              ctx->addr_ver->network == WALLY_NETWORK_LIQUID ||
+                              ctx->addr_ver->network == WALLY_NETWORK_LITECOIN;
         if (main_key != main_net)
             ret = WALLY_EINVAL; /* Mismatched main/test network */
     }

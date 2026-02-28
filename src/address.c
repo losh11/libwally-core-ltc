@@ -79,7 +79,8 @@ static bool is_p2pkh(unsigned char version)
            version == WALLY_ADDRESS_VERSION_P2PKH_TESTNET ||
            version == WALLY_ADDRESS_VERSION_P2PKH_LIQUID ||
            version == WALLY_ADDRESS_VERSION_P2PKH_LIQUID_REGTEST ||
-           version == WALLY_ADDRESS_VERSION_P2PKH_LIQUID_TESTNET;
+           version == WALLY_ADDRESS_VERSION_P2PKH_LIQUID_TESTNET ||
+           version == WALLY_ADDRESS_VERSION_P2PKH_LITECOIN;
 }
 
 static bool is_p2sh(unsigned char version)
@@ -88,17 +89,38 @@ static bool is_p2sh(unsigned char version)
            version == WALLY_ADDRESS_VERSION_P2SH_TESTNET ||
            version == WALLY_ADDRESS_VERSION_P2SH_LIQUID ||
            version == WALLY_ADDRESS_VERSION_P2SH_LIQUID_REGTEST ||
-           version == WALLY_ADDRESS_VERSION_P2SH_LIQUID_TESTNET;
+           version == WALLY_ADDRESS_VERSION_P2SH_LIQUID_TESTNET ||
+           version == WALLY_ADDRESS_VERSION_P2SH_LITECOIN ||
+           version == WALLY_ADDRESS_VERSION_P2SH_LITECOIN_TESTNET;
 }
 
-static int network_from_addr_version(uint32_t version, uint32_t *network)
+static int network_from_addr_version(uint32_t version, uint32_t requested_network, uint32_t *network)
 {
     switch (version) {
     case WALLY_ADDRESS_VERSION_P2PKH_MAINNET:
     case WALLY_ADDRESS_VERSION_P2SH_MAINNET:
         *network = WALLY_NETWORK_BITCOIN_MAINNET;
         break;
+    case WALLY_ADDRESS_VERSION_P2PKH_LITECOIN:
+    case WALLY_ADDRESS_VERSION_P2SH_LITECOIN:
+        *network = WALLY_NETWORK_LITECOIN;
+        break;
+    case WALLY_ADDRESS_VERSION_P2SH_LITECOIN_TESTNET:
+        /* 0x3A is used by Litecoin testnet and regtest */
+        if (requested_network == WALLY_NETWORK_LITECOIN_REGTEST)
+            *network = WALLY_NETWORK_LITECOIN_REGTEST;
+        else
+            *network = WALLY_NETWORK_LITECOIN_TESTNET;
+        break;
     case WALLY_ADDRESS_VERSION_P2PKH_TESTNET:
+        /* 0x6F is shared by Bitcoin testnet/regtest and Litecoin testnet/regtest.
+         * Use the requested network to disambiguate. */
+        if (requested_network == WALLY_NETWORK_LITECOIN_TESTNET ||
+            requested_network == WALLY_NETWORK_LITECOIN_REGTEST)
+            *network = requested_network;
+        else
+            *network = WALLY_NETWORK_BITCOIN_TESTNET;
+        break;
     case WALLY_ADDRESS_VERSION_P2SH_TESTNET:
         *network = WALLY_NETWORK_BITCOIN_TESTNET;
         break;
@@ -137,10 +159,17 @@ int wally_address_to_scriptpubkey(const char *addr, uint32_t network, unsigned c
         return WALLY_EINVAL;
 
     version = decoded[0];
-    if (network_from_addr_version(version, &addr_network) != WALLY_OK)
+    if (network_from_addr_version(version, network, &addr_network) != WALLY_OK)
         return WALLY_EINVAL;
+    /* Regtest networks share address prefixes with their testnet counterparts */
     if (network == WALLY_NETWORK_BITCOIN_REGTEST)
-        network = WALLY_NETWORK_BITCOIN_TESTNET; /* regtest uses testnet prefix */
+        network = WALLY_NETWORK_BITCOIN_TESTNET;
+    else if (network == WALLY_NETWORK_LITECOIN_REGTEST)
+        network = WALLY_NETWORK_LITECOIN_TESTNET;
+    if (addr_network == WALLY_NETWORK_BITCOIN_REGTEST)
+        addr_network = WALLY_NETWORK_BITCOIN_TESTNET;
+    else if (addr_network == WALLY_NETWORK_LITECOIN_REGTEST)
+        addr_network = WALLY_NETWORK_LITECOIN_TESTNET;
     if (network != addr_network)
         return WALLY_EINVAL;
 
@@ -173,6 +202,13 @@ int wally_scriptpubkey_to_address(const unsigned char *scriptpubkey, size_t scri
         case WALLY_NETWORK_BITCOIN_TESTNET:
             bytes[0] = WALLY_ADDRESS_VERSION_P2PKH_TESTNET;
             break;
+        case WALLY_NETWORK_LITECOIN:
+            bytes[0] = WALLY_ADDRESS_VERSION_P2PKH_LITECOIN;
+            break;
+        case WALLY_NETWORK_LITECOIN_REGTEST:
+        case WALLY_NETWORK_LITECOIN_TESTNET:
+            bytes[0] = WALLY_ADDRESS_VERSION_P2PKH_TESTNET;
+            break;
         case WALLY_NETWORK_LIQUID:
             bytes[0] = WALLY_ADDRESS_VERSION_P2PKH_LIQUID;
             break;
@@ -195,6 +231,13 @@ int wally_scriptpubkey_to_address(const unsigned char *scriptpubkey, size_t scri
         case WALLY_NETWORK_BITCOIN_REGTEST:
         case WALLY_NETWORK_BITCOIN_TESTNET:
             bytes[0] = WALLY_ADDRESS_VERSION_P2SH_TESTNET;
+            break;
+        case WALLY_NETWORK_LITECOIN:
+            bytes[0] = WALLY_ADDRESS_VERSION_P2SH_LITECOIN;
+            break;
+        case WALLY_NETWORK_LITECOIN_REGTEST:
+        case WALLY_NETWORK_LITECOIN_TESTNET:
+            bytes[0] = WALLY_ADDRESS_VERSION_P2SH_LITECOIN_TESTNET;
             break;
         case WALLY_NETWORK_LIQUID:
             bytes[0] = WALLY_ADDRESS_VERSION_P2SH_LIQUID;
