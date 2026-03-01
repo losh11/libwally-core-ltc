@@ -318,6 +318,7 @@ check-libwallycore: $(PYTHON_TEST_DEPS)
 	$(AM_V_at)$(PYTHON_TEST) test/test_hex.py
 	$(AM_V_at)$(PYTHON_TEST) test/test_hmac.py
 	$(AM_V_at)$(PYTHON_TEST) test/test_internal.py
+	$(AM_V_at)$(PYTHON_TEST) test/test_litecoin.py
 	$(AM_V_at)$(PYTHON_TEST) test/test_map.py
 	$(AM_V_at)$(PYTHON_TEST) test/test_mnemonic.py
 	$(AM_V_at)$(PYTHON_TEST) test/test_psbt.py
@@ -338,7 +339,7 @@ endif
 
 if USE_SWIG_PYTHON
 check-swig-python:
-	$(AM_V_at)$(PYTHON) -m virtualenv $(top_builddir)/venv
+	$(AM_V_at)$(PYTHON) -m venv $(top_builddir)/venv
 	$(AM_V_at)$(top_builddir)/venv/bin/python -m pip install $(top_srcdir)
 	$(AM_V_at)$(top_builddir)/venv/bin/python swig_python/contrib/aes.py
 	$(AM_V_at)$(top_builddir)/venv/bin/python swig_python/contrib/aes.py
