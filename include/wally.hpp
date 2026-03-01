@@ -821,6 +821,12 @@ inline int format_bitcoin_message(const BYTES& bytes, uint32_t flags, BYTES_OUT&
     return detail::check_ret(__FUNCTION__, ret);
 }
 
+template <class BYTES, class BYTES_OUT>
+inline int format_litecoin_message(const BYTES& bytes, uint32_t flags, BYTES_OUT& bytes_out, size_t* written) {
+    int ret = ::wally_format_litecoin_message(bytes.data(), bytes.size(), flags, bytes_out.data(), bytes_out.size(), written);
+    return detail::check_ret(__FUNCTION__, ret);
+}
+
 inline int free_string(char* str) {
     int ret = ::wally_free_string(str);
     return detail::check_ret(__FUNCTION__, ret);

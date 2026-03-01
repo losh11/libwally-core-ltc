@@ -9,6 +9,7 @@
 #define MSG_ALL_FLAGS (BITCOIN_MESSAGE_FLAG_HASH)
 
 static const char MSG_PREFIX[] = "\x18" "Bitcoin Signed Message:\n";
+static const char MSG_PREFIX_LTC[] = "\x19" "Litecoin Signed Message:\n";
 static const char TAPTWEAK_BTC[] = "TapTweak";
 #ifdef BUILD_ELEMENTS
 static const char TAPTWEAK_ELEMENTS[] = "TapTweak/elements";
@@ -629,7 +630,8 @@ static inline size_t varint_len(size_t bytes_len) {
     return bytes_len < 0xfd ? 1u : 3u;
 }
 
-int wally_format_bitcoin_message(const unsigned char *bytes, size_t bytes_len,
+static int format_signed_message(const char *prefix, size_t prefix_len,
+                                 const unsigned char *bytes, size_t bytes_len,
                                  uint32_t flags,
                                  unsigned char *bytes_out, size_t len,
                                  size_t *written)
@@ -645,7 +647,7 @@ int wally_format_bitcoin_message(const unsigned char *bytes, size_t bytes_len,
         (flags & ~MSG_ALL_FLAGS) || !bytes_out || !written)
         return WALLY_EINVAL;
 
-    msg_len = sizeof(MSG_PREFIX) - 1 + varint_len(bytes_len) + bytes_len;
+    msg_len = prefix_len + varint_len(bytes_len) + bytes_len;
     *written = do_hash ? SHA256_LEN : msg_len;
 
     if (len < *written)
@@ -665,8 +667,8 @@ int wally_format_bitcoin_message(const unsigned char *bytes, size_t bytes_len,
 
     /* Serialize the message */
     out = msg_buf;
-    memcpy(out, MSG_PREFIX, sizeof(MSG_PREFIX) - 1);
-    out += sizeof(MSG_PREFIX) - 1;
+    memcpy(out, prefix, prefix_len);
+    out += prefix_len;
     if (bytes_len < 0xfd)
         *out++ = bytes_len;
     else {
@@ -683,6 +685,24 @@ int wally_format_bitcoin_message(const unsigned char *bytes, size_t bytes_len,
             wally_free(msg_buf);
     }
     return WALLY_OK;
+}
+
+int wally_format_bitcoin_message(const unsigned char *bytes, size_t bytes_len,
+                                 uint32_t flags,
+                                 unsigned char *bytes_out, size_t len,
+                                 size_t *written)
+{
+    return format_signed_message(MSG_PREFIX, sizeof(MSG_PREFIX) - 1,
+                                bytes, bytes_len, flags, bytes_out, len, written);
+}
+
+int wally_format_litecoin_message(const unsigned char *bytes, size_t bytes_len,
+                                  uint32_t flags,
+                                  unsigned char *bytes_out, size_t len,
+                                  size_t *written)
+{
+    return format_signed_message(MSG_PREFIX_LTC, sizeof(MSG_PREFIX_LTC) - 1,
+                                bytes, bytes_len, flags, bytes_out, len, written);
 }
 
 #ifndef BUILD_STANDARD_SECP

@@ -60,6 +60,12 @@ def format_bitcoin_message_len(msg, flags):
     msg_len = len(msg)
     return 25 + msg_len + (1 if msg_len < 253 else 3)
 
+def format_litecoin_message_len(msg, flags):
+    if flags & BITCOIN_MESSAGE_FLAG_HASH:
+        return SHA256_LEN
+    msg_len = len(msg)
+    return 26 + msg_len + (1 if msg_len < 253 else 3)
+
 def script_push_from_bytes_len(data, flags):
     if flags & WALLY_SCRIPT_HASH160:
         return HASH160_LEN + 1
@@ -167,6 +173,7 @@ ec_sig_to_der = _wrap_bin(ec_sig_to_der, EC_SIGNATURE_DER_MAX_LEN, resize=True)
 ec_sig_to_public_key = _wrap_bin(ec_sig_to_public_key, EC_PUBLIC_KEY_LEN)
 ecdh = _wrap_bin(ecdh, SHA256_LEN)
 format_bitcoin_message = _wrap_bin(format_bitcoin_message, format_bitcoin_message_len, resize=True)
+format_litecoin_message = _wrap_bin(format_litecoin_message, format_litecoin_message_len, resize=True)
 get_hash_prevouts = _wrap_bin(get_hash_prevouts, SHA256_LEN)
 hash160 = _wrap_bin(hash160, HASH160_LEN)
 hex_n_to_bytes = _wrap_bin(hex_n_to_bytes, hex_n_to_bytes_len)

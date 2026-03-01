@@ -30,6 +30,7 @@ MISSING_LEN_FUNCS = {
     'wally_elements_pegin_contract_script_from_bytes': True,
     'wally_elements_pegout_script_from_bytes': True,
     'wally_format_bitcoin_message': True,
+    'wally_format_litecoin_message': True,
     'wally_hex_n_to_bytes': False,
     'wally_hex_to_bytes': False,
     'wally_script_push_from_bytes': True,

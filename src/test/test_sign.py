@@ -233,6 +233,44 @@ class SignTests(unittest.TestCase):
             ret, written = wally_format_bitcoin_message(msg, msg_len, flags, o, o_len)
             self.assertEqual(ret, WALLY_EINVAL)
 
+    def test_format_litecoin_message(self):
+        PREFIX_LTC = b'\x19Litecoin Signed Message:\n'
+        MAX_LEN = 64 * 1024 - 64
+        out_buf, out_len = make_cbuffer('00' * 64 * 1024)
+
+        # Test a few representative cases (short, varint boundary, long)
+        cases = [(b'a',           b'\x01'),
+                 (b'aaa',         b'\x03'),
+                 (b'a' * 253,     b'\xfd\xfd\x00'),
+                 (b'a' * MAX_LEN, b'\xfd\xc0\xff')]
+        for msg, varint in cases:
+            for flags in (0, BITCOIN_MESSAGE_HASH_FLAG):
+                expected = PREFIX_LTC + varint + msg
+                if flags:
+                    buf, buf_len = make_cbuffer('00'*32)
+                    self.assertEqual(WALLY_OK, wally_sha256d(expected, len(expected), buf, buf_len))
+                    expected = buf
+
+                ret, written = wally_format_litecoin_message(msg, len(msg), flags, out_buf, out_len)
+                self.assertEqual((ret, written), (WALLY_OK, len(expected)))
+                self.assertEqual(out_buf[:written], expected)
+
+        # Verify Litecoin prefix differs from Bitcoin
+        msg = b'test'
+        ret_btc, w_btc = wally_format_bitcoin_message(msg, len(msg), 0, out_buf, out_len)
+        btc_result = bytes(out_buf[:w_btc])
+        ret_ltc, w_ltc = wally_format_litecoin_message(msg, len(msg), 0, out_buf, out_len)
+        ltc_result = bytes(out_buf[:w_ltc])
+        self.assertNotEqual(btc_result, ltc_result)
+        self.assertEqual(w_ltc, w_btc + 1)  # Litecoin prefix is 1 byte longer
+
+        # Verify hashed outputs differ
+        ret_btc, w_btc = wally_format_bitcoin_message(msg, len(msg), BITCOIN_MESSAGE_HASH_FLAG, out_buf, out_len)
+        btc_hash = bytes(out_buf[:w_btc])
+        ret_ltc, w_ltc = wally_format_litecoin_message(msg, len(msg), BITCOIN_MESSAGE_HASH_FLAG, out_buf, out_len)
+        ltc_hash = bytes(out_buf[:w_ltc])
+        self.assertEqual(w_btc, w_ltc)  # Both produce SHA256_LEN
+        self.assertNotEqual(btc_hash, ltc_hash)  # Different prefixes -> different hashes
 
     def test_recoverable_sig(self):
         priv_key, msg, out1, out2, pub_key, pub_key_rec = self.cbufferize(

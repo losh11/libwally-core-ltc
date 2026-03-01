@@ -836,6 +836,20 @@ WALLY_CORE_API int wally_format_bitcoin_message(
     size_t *written);
 
 /**
+ * Format a message for use as a litecoin signed message.
+ *
+ * See `wally_format_bitcoin_message`. Uses the Litecoin message prefix
+ * ("Litecoin Signed Message:\\n") instead of the Bitcoin prefix.
+ */
+WALLY_CORE_API int wally_format_litecoin_message(
+    const unsigned char *bytes,
+    size_t bytes_len,
+    uint32_t flags,
+    unsigned char *bytes_out,
+    size_t len,
+    size_t *written);
+
+/**
  *
  * Compute an EC Diffie-Hellman secret in constant time.
  *

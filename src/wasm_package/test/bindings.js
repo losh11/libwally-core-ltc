@@ -150,6 +150,20 @@ test('Functions that depend on a JS length function', t => {
         assert.equal(wally.format_bitcoin_message(Buffer.from('a'), wally.BITCOIN_MESSAGE_FLAG_HASH).length, wally.SHA256_LEN)
     })
 
+    test('format_litecoin_message', () => {
+        const MSG_PREFIX_HEX = Buffer.from('\x19Litecoin Signed Message:\n').toString('hex')
+        const test_msg = (msg, varint_hex) =>
+            assert.equal(wally.format_litecoin_message(msg, 0).toString('hex'), MSG_PREFIX_HEX + varint_hex + msg.toString('hex'))
+        test_msg(Buffer.from('aaa'), '03')
+        test_msg(Buffer.from(r('a', 253)), 'fdfd00')
+        assert.equal(wally.format_litecoin_message(Buffer.from('a'), wally.BITCOIN_MESSAGE_FLAG_HASH).length, wally.SHA256_LEN)
+        // Verify different from Bitcoin
+        const btc = wally.format_bitcoin_message(Buffer.from('test'), 0)
+        const ltc = wally.format_litecoin_message(Buffer.from('test'), 0)
+        assert.notDeepEqual(btc, ltc)
+        assert.equal(ltc.length, btc.length + 1)
+    })
+
     test('script_push_from_bytes', () => {
         const test_script_push = (data, prefix_hex) =>
             assert.equal(wally.script_push_from_bytes(data, 0).toString('hex'), prefix_hex + data.toString('hex'))
