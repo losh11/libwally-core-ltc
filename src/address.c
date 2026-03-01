@@ -98,8 +98,15 @@ static int network_from_addr_version(uint32_t version, uint32_t requested_networ
 {
     switch (version) {
     case WALLY_ADDRESS_VERSION_P2PKH_MAINNET:
-    case WALLY_ADDRESS_VERSION_P2SH_MAINNET:
         *network = WALLY_NETWORK_BITCOIN_MAINNET;
+        break;
+    case WALLY_ADDRESS_VERSION_P2SH_MAINNET:
+        /* 0x05: Bitcoin P2SH, but also legacy Litecoin P2SH (pre-0.16).
+         * Use the requested network to disambiguate. */
+        if (requested_network == WALLY_NETWORK_LITECOIN)
+            *network = WALLY_NETWORK_LITECOIN;
+        else
+            *network = WALLY_NETWORK_BITCOIN_MAINNET;
         break;
     case WALLY_ADDRESS_VERSION_P2PKH_LITECOIN:
     case WALLY_ADDRESS_VERSION_P2SH_LITECOIN:
@@ -122,7 +129,14 @@ static int network_from_addr_version(uint32_t version, uint32_t requested_networ
             *network = WALLY_NETWORK_BITCOIN_TESTNET;
         break;
     case WALLY_ADDRESS_VERSION_P2SH_TESTNET:
-        *network = WALLY_NETWORK_BITCOIN_TESTNET;
+        /* 0xC4: Bitcoin testnet P2SH, but also legacy Litecoin testnet/regtest P2SH.
+         * Use the requested network to disambiguate. */
+        if (requested_network == WALLY_NETWORK_LITECOIN_TESTNET)
+            *network = WALLY_NETWORK_LITECOIN_TESTNET;
+        else if (requested_network == WALLY_NETWORK_LITECOIN_REGTEST)
+            *network = WALLY_NETWORK_LITECOIN_REGTEST;
+        else
+            *network = WALLY_NETWORK_BITCOIN_TESTNET;
         break;
     case WALLY_ADDRESS_VERSION_P2PKH_LIQUID:
     case WALLY_ADDRESS_VERSION_P2SH_LIQUID:
