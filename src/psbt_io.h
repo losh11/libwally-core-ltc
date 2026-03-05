@@ -288,4 +288,60 @@
                                             !PSET_BLINDING_STATE_FULL(state) && \
                                             (state & PSET_OUT_BLINDING_FIELDS) != PSET_FT(PSET_OUT_BLINDING_PUBKEY))
 
+#ifdef BUILD_MWEB
+/* MWEB Global fields */
+#define MWEB_GLOBAL_TX_OFFSET 0x90
+#define MWEB_GLOBAL_STEALTH_OFFSET 0x91
+#define MWEB_GLOBAL_KERNEL_COUNT 0x92
+
+/* MWEB Input fields */
+#define MWEB_IN_SPENT_OUTPUT_ID 0x90
+#define MWEB_IN_SPENT_OUTPUT_COMMIT 0x91
+#define MWEB_IN_SPENT_OUTPUT_PUBKEY 0x92
+#define MWEB_IN_INPUT_PUBKEY 0x93
+#define MWEB_IN_INPUT_FEATURES 0x94
+#define MWEB_IN_INPUT_SIGNATURE 0x95
+#define MWEB_IN_ADDRESS_INDEX 0x96
+#define MWEB_IN_INPUT_AMOUNT 0x97
+#define MWEB_IN_SHARED_SECRET 0x98
+#define MWEB_IN_KEY_EXCHANGE_PUBKEY 0x99
+#define MWEB_IN_MASTER_SCAN_KEY_ORIGIN 0x9A
+#define MWEB_IN_MASTER_SPEND_KEY_ORIGIN 0x9B
+#define MWEB_IN_EXTRA_DATA 0x9C
+#define MWEB_IN_MIN MWEB_IN_SPENT_OUTPUT_ID
+#define MWEB_IN_MAX MWEB_IN_EXTRA_DATA
+
+/* MWEB Input fields with key data (pubkey in key, like BIP32_DERIVATION) */
+#define MWEB_IN_HAVE_KEYDATA ((1u << (MWEB_IN_MASTER_SCAN_KEY_ORIGIN - MWEB_IN_MIN)) | \
+                              (1u << (MWEB_IN_MASTER_SPEND_KEY_ORIGIN - MWEB_IN_MIN)))
+
+/* Canonical MWEB input: has MwebSpentOutputId (0x90) */
+#define MWEB_IN_HAS_OUTPUT_ID(keyset) ((keyset) & (1u << (MWEB_IN_SPENT_OUTPUT_ID - MWEB_IN_MIN)))
+
+/* MWEB Output field range */
+#define MWEB_OUT_MIN 0x90
+#define MWEB_OUT_MAX 0x98
+
+/* Canonical MWEB output identity: stealth address (0x90) or commit (0x91) */
+#define MWEB_OUT_STEALTH_ADDRESS 0x90
+#define MWEB_OUT_COMMIT          0x91
+#define MWEB_OUT_IS_MWEB(keyset) ((keyset) & ((1u << (MWEB_OUT_STEALTH_ADDRESS - MWEB_OUT_MIN)) | \
+                                               (1u << (MWEB_OUT_COMMIT - MWEB_OUT_MIN))))
+
+/* MWEB Kernel fields */
+#define MWEB_KRN_EXCESS_COMMITMENT 0x00
+#define MWEB_KRN_STEALTH_EXCESS 0x01
+#define MWEB_KRN_FEE 0x02
+#define MWEB_KRN_PEGIN_AMOUNT 0x03
+#define MWEB_KRN_PEGOUT 0x04
+#define MWEB_KRN_LOCK_HEIGHT 0x05
+#define MWEB_KRN_FEATURES 0x06
+#define MWEB_KRN_EXTRA_DATA 0x07
+#define MWEB_KRN_SIGNATURE 0x08
+#define MWEB_KRN_MAX MWEB_KRN_SIGNATURE
+
+/* MWEB Kernel fields that can be repeated */
+#define MWEB_KRN_REPEATABLE (1u << MWEB_KRN_PEGOUT)
+#endif /* BUILD_MWEB */
+
 #endif /* LIBWALLY_CORE_PSBT_IO_H */

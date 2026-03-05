@@ -61,6 +61,30 @@ extern "C" {
 
 #define WALLY_SCALAR_OFFSET_LEN 32 /* Length of a PSET scalar offset */
 
+#ifdef BUILD_MWEB
+/** An MWEB kernel in a PSBT */
+struct wally_psbt_kernel {
+    unsigned char excess_commitment[EC_PUBLIC_KEY_LEN]; /* 33 bytes */
+    uint32_t has_excess_commitment;
+    unsigned char stealth_excess[EC_PUBLIC_KEY_LEN]; /* 33 bytes */
+    uint32_t has_stealth_excess;
+    uint64_t fee;
+    uint32_t has_fee;
+    uint64_t pegin_amount;
+    uint32_t has_pegin_amount;
+    struct wally_map pegouts; /* Repeatable: key=varint index, value=amount+pkscript */
+    uint32_t lock_height;
+    uint32_t has_lock_height;
+    uint8_t features;
+    uint32_t has_features;
+    unsigned char *extra_data;
+    size_t extra_data_len;
+    unsigned char signature[EC_SIGNATURE_LEN]; /* 64 bytes */
+    uint32_t has_signature;
+    struct wally_map unknowns; /* Forward-compatibility: preserve unknown kernel fields */
+};
+#endif /* BUILD_MWEB */
+
 #ifdef SWIG
 struct wally_psbt_input;
 struct wally_psbt_output;
@@ -88,6 +112,23 @@ struct wally_psbt_input {
     /* Hashes and paths for taproot bip32 derivation path */
     struct wally_map taproot_leaf_hashes;
     struct wally_map taproot_leaf_paths;
+#ifdef BUILD_MWEB
+    unsigned char mweb_spent_output_id[WALLY_TXHASH_LEN]; /* 32 bytes */
+    unsigned char mweb_spent_output_commit[EC_PUBLIC_KEY_LEN]; /* 33 bytes */
+    unsigned char mweb_spent_output_pubkey[EC_PUBLIC_KEY_LEN]; /* 33 bytes */
+    unsigned char mweb_input_pubkey[EC_PUBLIC_KEY_LEN]; /* 33 bytes */
+    uint8_t mweb_input_features;
+    unsigned char mweb_input_signature[EC_SIGNATURE_LEN]; /* 64 bytes */
+    uint32_t mweb_address_index;
+    uint64_t mweb_input_amount;
+    unsigned char mweb_shared_secret[WALLY_TXHASH_LEN]; /* 32 bytes */
+    unsigned char mweb_key_exchange_pubkey[EC_PUBLIC_KEY_LEN]; /* 33 bytes */
+    struct wally_map mweb_scan_key_origin; /* Singular keypath map */
+    struct wally_map mweb_spend_key_origin; /* Singular keypath map */
+    unsigned char *mweb_extra_data;
+    size_t mweb_extra_data_len;
+    uint16_t mweb_keyset; /* Bitset for duplicate tracking */
+#endif /* BUILD_MWEB */
 #ifndef WALLY_ABI_NO_ELEMENTS
     uint64_t issuance_amount; /* Issuance amount, or 0 if not given */
     uint64_t inflation_keys; /* Number of reissuance tokens, or 0 if none given */
@@ -115,6 +156,9 @@ struct wally_psbt_output {
     /* Hashes and paths for taproot bip32 derivation path */
     struct wally_map taproot_leaf_hashes;
     struct wally_map taproot_leaf_paths;
+#ifdef BUILD_MWEB
+    uint16_t mweb_output_keyset; /* Tracks which MWEB output types (0x90-0x98) are present */
+#endif /* BUILD_MWEB */
 #ifndef WALLY_ABI_NO_ELEMENTS
     uint32_t blinder_index; /* Index of the input whose owner should blind this output */
     uint32_t has_blinder_index;
@@ -144,6 +188,16 @@ struct wally_psbt {
     uint32_t pset_modifiable_flags;
     unsigned char genesis_blockhash[SHA256_LEN]; /* All zeros if not present */
 #endif /* WALLY_ABI_NO_ELEMENTS */
+#ifdef BUILD_MWEB
+    unsigned char mweb_tx_offset[WALLY_TXHASH_LEN]; /* 32 bytes */
+    uint32_t has_mweb_tx_offset;
+    unsigned char mweb_stealth_offset[WALLY_TXHASH_LEN]; /* 32 bytes */
+    uint32_t has_mweb_stealth_offset;
+    struct wally_psbt_kernel *mweb_kernels;
+    size_t num_mweb_kernels;
+    size_t mweb_kernels_allocation_len;
+    uint32_t has_mweb_kernel_count; /* Preserve kernel_count=0 on round-trip */
+#endif /* BUILD_MWEB */
     struct wally_map *signing_cache;
 };
 #endif /* SWIG */

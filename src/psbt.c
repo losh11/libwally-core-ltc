@@ -836,6 +836,10 @@ static void psbt_input_init(struct wally_psbt_input *input)
     wally_map_init(0, NULL /* FIXME */, &input->taproot_leaf_scripts);
     wally_map_init(0, map_leaf_hashes_verify, &input->taproot_leaf_hashes);
     wally_map_init(0, wally_keypath_xonly_public_key_verify, &input->taproot_leaf_paths);
+#ifdef BUILD_MWEB
+    wally_map_init(0, wally_keypath_public_key_verify, &input->mweb_scan_key_origin);
+    wally_map_init(0, wally_keypath_public_key_verify, &input->mweb_spend_key_origin);
+#endif /* BUILD_MWEB */
 #ifdef BUILD_ELEMENTS
     wally_map_init(0, pset_map_input_field_verify, &input->pset_fields);
 #endif /* BUILD_ELEMENTS */
@@ -856,6 +860,11 @@ static int psbt_input_free(struct wally_psbt_input *input, bool free_parent)
         wally_map_clear(&input->taproot_leaf_scripts);
         wally_map_clear(&input->taproot_leaf_hashes);
         wally_map_clear(&input->taproot_leaf_paths);
+#ifdef BUILD_MWEB
+        wally_map_clear(&input->mweb_scan_key_origin);
+        wally_map_clear(&input->mweb_spend_key_origin);
+        clear_and_free(input->mweb_extra_data, input->mweb_extra_data_len);
+#endif /* BUILD_MWEB */
 #ifdef BUILD_ELEMENTS
         wally_tx_free(input->pegin_tx);
         wally_tx_witness_stack_free(input->pegin_witness);
@@ -1167,6 +1176,37 @@ static void psbt_outputs_free(struct wally_psbt_output *outputs, size_t num_outp
     }
 }
 
+#ifdef BUILD_MWEB
+static void psbt_kernel_init(struct wally_psbt_kernel *kernel)
+{
+    wally_clear(kernel, sizeof(*kernel));
+    wally_map_init(0, NULL, &kernel->pegouts);
+    wally_map_init(0, NULL, &kernel->unknowns);
+}
+
+static int psbt_kernel_free(struct wally_psbt_kernel *kernel, bool free_parent)
+{
+    if (kernel) {
+        wally_map_clear(&kernel->pegouts);
+        wally_map_clear(&kernel->unknowns);
+        clear_and_free(kernel->extra_data, kernel->extra_data_len);
+        wally_clear(kernel, sizeof(*kernel));
+        if (free_parent)
+            wally_free(kernel);
+    }
+    return WALLY_OK;
+}
+
+static void psbt_kernels_free(struct wally_psbt_kernel *kernels, size_t num_kernels)
+{
+    if (kernels) {
+        for (size_t i = 0; i < num_kernels; ++i)
+            psbt_kernel_free(&kernels[i], false);
+        wally_free(kernels);
+    }
+}
+#endif /* BUILD_MWEB */
+
 static int psbt_init(uint32_t version, size_t num_inputs, size_t num_outputs,
                      size_t num_unknowns, uint32_t flags,
                      size_t max_num_inputs, size_t max_num_outputs,
@@ -1316,6 +1356,9 @@ int wally_psbt_free(struct wally_psbt *psbt)
 
         wally_map_clear(&psbt->unknowns);
         wally_map_clear(&psbt->global_xpubs);
+#ifdef BUILD_MWEB
+        psbt_kernels_free(psbt->mweb_kernels, psbt->num_mweb_kernels);
+#endif /* BUILD_MWEB */
 #ifdef BUILD_ELEMENTS
         wally_map_clear(&psbt->global_scalars);
 #endif /* BUILD_ELEMENTS */
@@ -2295,6 +2338,109 @@ static struct wally_psbt *pull_psbt(const unsigned char **cursor, size_t *max)
     return ret == WALLY_OK ? psbt : NULL;
 }
 
+#ifdef BUILD_MWEB
+static int pull_psbt_kernel(const unsigned char **cursor, size_t *max,
+                            struct wally_psbt_kernel *result)
+{
+    size_t key_len, val_len;
+    const unsigned char *pre_key = *cursor, *val_p;
+    uint32_t keyset = 0;
+    int ret = WALLY_OK;
+
+    psbt_kernel_init(result);
+
+    /* Read key value pairs */
+    while (ret == WALLY_OK && (key_len = pull_varlength(cursor, max)) != 0) {
+        const unsigned char *key;
+        uint64_t field_type;
+        uint32_t field_bit;
+
+        pull_subfield_start(cursor, max, key_len, &key, &key_len);
+        field_type = pull_varint(&key, &key_len);
+
+        if (field_type > MWEB_KRN_MAX) {
+            /* Unknown kernel field: preserve in unknowns map.
+             * pull_unknown_key_value rewinds to pre_key and re-reads. */
+            ret = pull_unknown_key_value(cursor, max, pre_key, &result->unknowns);
+            pre_key = *cursor;
+            continue;
+        }
+
+        field_bit = 1u << field_type;
+
+        /* Duplicate check (pegouts are repeatable) */
+        if ((keyset & field_bit) && !(MWEB_KRN_REPEATABLE & field_bit)) {
+            ret = WALLY_EINVAL;
+            break;
+        }
+        keyset |= field_bit;
+
+        /* Pegout has key data (varint index), all others have none */
+        if (field_type == MWEB_KRN_PEGOUT)
+            pull_subfield_end(cursor, max, key, key_len);
+        else
+            subfield_nomore_end(cursor, max, key, key_len);
+
+        switch (field_type) {
+        case MWEB_KRN_EXCESS_COMMITMENT:
+            pull_varlength_buff(cursor, max, &val_p, &val_len);
+            if (val_len != EC_PUBLIC_KEY_LEN)
+                ret = WALLY_EINVAL;
+            else {
+                memcpy(result->excess_commitment, val_p, EC_PUBLIC_KEY_LEN);
+                result->has_excess_commitment = 1u;
+            }
+            break;
+        case MWEB_KRN_STEALTH_EXCESS:
+            pull_varlength_buff(cursor, max, &val_p, &val_len);
+            if (val_len != EC_PUBLIC_KEY_LEN)
+                ret = WALLY_EINVAL;
+            else {
+                memcpy(result->stealth_excess, val_p, EC_PUBLIC_KEY_LEN);
+                result->has_stealth_excess = 1u;
+            }
+            break;
+        case MWEB_KRN_FEE:
+            result->fee = pull_le64_subfield(cursor, max);
+            result->has_fee = 1u;
+            break;
+        case MWEB_KRN_PEGIN_AMOUNT:
+            result->pegin_amount = pull_le64_subfield(cursor, max);
+            result->has_pegin_amount = 1u;
+            break;
+        case MWEB_KRN_PEGOUT:
+            ret = pull_map_item(cursor, max, key, key_len, &result->pegouts);
+            break;
+        case MWEB_KRN_LOCK_HEIGHT:
+            result->lock_height = pull_le32_subfield(cursor, max);
+            result->has_lock_height = 1u;
+            break;
+        case MWEB_KRN_FEATURES:
+            result->features = pull_u8_subfield(cursor, max);
+            result->has_features = 1u;
+            break;
+        case MWEB_KRN_EXTRA_DATA:
+            pull_varlength_buff(cursor, max, &val_p, &val_len);
+            if (val_len && val_p)
+                ret = replace_bytes(val_p, val_len, &result->extra_data, &result->extra_data_len);
+            break;
+        case MWEB_KRN_SIGNATURE:
+            pull_varlength_buff(cursor, max, &val_p, &val_len);
+            if (val_len != EC_SIGNATURE_LEN)
+                ret = WALLY_EINVAL;
+            else {
+                memcpy(result->signature, val_p, EC_SIGNATURE_LEN);
+                result->has_signature = 1u;
+            }
+            break;
+        }
+        pre_key = *cursor;
+    }
+
+    return ret;
+}
+#endif /* BUILD_MWEB */
+
 static int pull_psbt_input(const struct wally_psbt *psbt,
                            const unsigned char **cursor, size_t *max,
                            uint32_t tx_flags, uint32_t flags,
@@ -2336,6 +2482,106 @@ static int pull_psbt_input(const struct wally_psbt *psbt,
             is_known = field_type <= PSBT_IN_MAX;
             if (is_known)
                 field_bit = PSBT_FT(field_type);
+#ifdef BUILD_MWEB
+            if (!is_known && raw_field_type >= MWEB_IN_MIN && raw_field_type <= MWEB_IN_MAX) {
+                const uint16_t mweb_bit = (uint16_t)(1u << (raw_field_type - MWEB_IN_MIN));
+                const bool mweb_has_keydata = (MWEB_IN_HAVE_KEYDATA & mweb_bit) != 0;
+
+                /* MWEB input fields are disallowed in PSBTv0 */
+                if (psbt->version == PSBT_0 && !(flags & WALLY_PSBT_PARSE_FLAG_LOOSE)) {
+                    ret = WALLY_EINVAL;
+                    break;
+                }
+
+                /* Duplicate check */
+                if (result->mweb_keyset & mweb_bit) {
+                    ret = WALLY_EINVAL;
+                    break;
+                }
+                result->mweb_keyset |= mweb_bit;
+
+                /* Key data handling */
+                if (mweb_has_keydata)
+                    pull_subfield_end(cursor, max, key, key_len);
+                else
+                    subfield_nomore_end(cursor, max, key, key_len);
+
+                /* Parse MWEB field value */
+                switch (raw_field_type) {
+                case MWEB_IN_SPENT_OUTPUT_ID:
+                    pull_varlength_buff(cursor, max, &val_p, &val_len);
+                    if (val_len != WALLY_TXHASH_LEN)
+                        ret = WALLY_EINVAL;
+                    else
+                        memcpy(result->mweb_spent_output_id, val_p, WALLY_TXHASH_LEN);
+                    break;
+                case MWEB_IN_SPENT_OUTPUT_COMMIT:
+                    pull_varlength_buff(cursor, max, &val_p, &val_len);
+                    if (val_len != EC_PUBLIC_KEY_LEN)
+                        ret = WALLY_EINVAL;
+                    else
+                        memcpy(result->mweb_spent_output_commit, val_p, EC_PUBLIC_KEY_LEN);
+                    break;
+                case MWEB_IN_SPENT_OUTPUT_PUBKEY:
+                    pull_varlength_buff(cursor, max, &val_p, &val_len);
+                    if (val_len != EC_PUBLIC_KEY_LEN)
+                        ret = WALLY_EINVAL;
+                    else
+                        memcpy(result->mweb_spent_output_pubkey, val_p, EC_PUBLIC_KEY_LEN);
+                    break;
+                case MWEB_IN_INPUT_PUBKEY:
+                    pull_varlength_buff(cursor, max, &val_p, &val_len);
+                    if (val_len != EC_PUBLIC_KEY_LEN)
+                        ret = WALLY_EINVAL;
+                    else
+                        memcpy(result->mweb_input_pubkey, val_p, EC_PUBLIC_KEY_LEN);
+                    break;
+                case MWEB_IN_INPUT_FEATURES:
+                    result->mweb_input_features = pull_u8_subfield(cursor, max);
+                    break;
+                case MWEB_IN_INPUT_SIGNATURE:
+                    pull_varlength_buff(cursor, max, &val_p, &val_len);
+                    if (val_len != EC_SIGNATURE_LEN)
+                        ret = WALLY_EINVAL;
+                    else
+                        memcpy(result->mweb_input_signature, val_p, EC_SIGNATURE_LEN);
+                    break;
+                case MWEB_IN_ADDRESS_INDEX:
+                    result->mweb_address_index = pull_le32_subfield(cursor, max);
+                    break;
+                case MWEB_IN_INPUT_AMOUNT:
+                    result->mweb_input_amount = pull_le64_subfield(cursor, max);
+                    break;
+                case MWEB_IN_SHARED_SECRET:
+                    pull_varlength_buff(cursor, max, &val_p, &val_len);
+                    if (val_len != WALLY_TXHASH_LEN)
+                        ret = WALLY_EINVAL;
+                    else
+                        memcpy(result->mweb_shared_secret, val_p, WALLY_TXHASH_LEN);
+                    break;
+                case MWEB_IN_KEY_EXCHANGE_PUBKEY:
+                    pull_varlength_buff(cursor, max, &val_p, &val_len);
+                    if (val_len != EC_PUBLIC_KEY_LEN)
+                        ret = WALLY_EINVAL;
+                    else
+                        memcpy(result->mweb_key_exchange_pubkey, val_p, EC_PUBLIC_KEY_LEN);
+                    break;
+                case MWEB_IN_MASTER_SCAN_KEY_ORIGIN:
+                    ret = pull_map_item(cursor, max, key, key_len, &result->mweb_scan_key_origin);
+                    break;
+                case MWEB_IN_MASTER_SPEND_KEY_ORIGIN:
+                    ret = pull_map_item(cursor, max, key, key_len, &result->mweb_spend_key_origin);
+                    break;
+                case MWEB_IN_EXTRA_DATA:
+                    pull_varlength_buff(cursor, max, &val_p, &val_len);
+                    if (val_len && val_p)
+                        ret = replace_bytes(val_p, val_len, &result->mweb_extra_data, &result->mweb_extra_data_len);
+                    break;
+                }
+                pre_key = *cursor;
+                continue;
+            }
+#endif /* BUILD_MWEB */
         }
 
         /* Process based on type */
@@ -2472,6 +2718,13 @@ unknown:
         pre_key = *cursor;
     }
 
+#ifdef BUILD_MWEB
+    /* MWEB inputs don't have standard prevout (txid/index).
+     * Relax mandatory v2 fields only for canonical MWEB inputs (has output_id). */
+    if (MWEB_IN_HAS_OUTPUT_ID(result->mweb_keyset))
+        mandatory &= ~PSBT_IN_MANDATORY_V2;
+#endif
+
     if (!(flags & WALLY_PSBT_PARSE_FLAG_LOOSE)) {
         if (mandatory && (keyset & mandatory) != mandatory)
             ret = WALLY_EINVAL; /* Mandatory field is missing */
@@ -2546,6 +2799,50 @@ static int pull_psbt_output(const struct wally_psbt *psbt,
             is_known = field_type <= PSBT_OUT_MAX;
             if (is_known)
                 field_bit = PSBT_FT(field_type);
+#ifdef BUILD_MWEB
+            if (!is_known && raw_field_type >= MWEB_OUT_MIN && raw_field_type <= MWEB_OUT_MAX) {
+                const uint16_t mweb_obit = (uint16_t)(1u << (raw_field_type - MWEB_OUT_MIN));
+                const unsigned char *mweb_val;
+                size_t mweb_val_len;
+                unsigned char mweb_type_key;
+
+                /* MWEB output fields are disallowed in PSBTv0 */
+                if (psbt->version == PSBT_0 && !(flags & WALLY_PSBT_PARSE_FLAG_LOOSE)) {
+                    ret = WALLY_EINVAL;
+                    break;
+                }
+                /* Duplicate check */
+                if (result->mweb_output_keyset & mweb_obit) {
+                    ret = WALLY_EINVAL;
+                    break;
+                }
+                /* MWEB output fields must have no key data (just the type byte) */
+                subfield_nomore_end(cursor, max, key, key_len);
+                if (!*cursor) {
+                    ret = WALLY_EINVAL;
+                    break;
+                }
+
+                /* Read value and validate sizes for identity fields */
+                pull_varlength_buff(cursor, max, &mweb_val, &mweb_val_len);
+                if (raw_field_type == MWEB_OUT_STEALTH_ADDRESS && mweb_val_len != 66) {
+                    ret = WALLY_EINVAL; /* Stealth address must be 66 bytes */
+                    break;
+                }
+                if (raw_field_type == MWEB_OUT_COMMIT && mweb_val_len != EC_PUBLIC_KEY_LEN) {
+                    ret = WALLY_EINVAL; /* Commitment must be 33 bytes */
+                    break;
+                }
+
+                result->mweb_output_keyset |= mweb_obit;
+                /* Store in unknowns: key is the single type byte */
+                mweb_type_key = (unsigned char)raw_field_type;
+                ret = map_add(&result->unknowns, &mweb_type_key, 1,
+                              mweb_val, mweb_val_len, false, false);
+                pre_key = *cursor;
+                continue;
+            }
+#endif
         }
 
         /* Process based on type */
@@ -2626,6 +2923,13 @@ unknown:
     }
 #endif /* BUILD_ELEMENTS */
 
+#ifdef BUILD_MWEB
+    /* MWEB outputs don't have scripts — relax only for canonical MWEB
+     * outputs (must have stealth address 0x90 or commit 0x91) */
+    if (MWEB_OUT_IS_MWEB(result->mweb_output_keyset))
+        mandatory &= ~PSBT_FT(PSBT_OUT_SCRIPT);
+#endif /* BUILD_MWEB */
+
     if (!(flags & WALLY_PSBT_PARSE_FLAG_LOOSE)) {
         if (mandatory && (keyset & mandatory) != mandatory)
             ret = WALLY_EINVAL; /* Mandatory field is missing*/
@@ -2654,6 +2958,9 @@ int wally_psbt_from_bytes(const unsigned char *bytes, size_t len,
     size_t *max = &len, i, key_len, input_count = 0, output_count = 0;
     uint32_t tx_flags = 0, pre144flag = WALLY_TX_FLAG_PRE_BIP144;
     uint64_t mandatory, disallowed, keyset = 0;
+#ifdef BUILD_MWEB
+    uint8_t mweb_global_keyset = 0;
+#endif
     bool is_pset = false;
     int ret = WALLY_OK;
 
@@ -2702,6 +3009,49 @@ int wally_psbt_from_bytes(const unsigned char *bytes, size_t len,
                 else
                     field_bit = PSBT_FT(field_type);
             }
+#ifdef BUILD_MWEB
+            if (!is_known && field_type >= MWEB_GLOBAL_TX_OFFSET && field_type <= MWEB_GLOBAL_KERNEL_COUNT) {
+                const uint8_t mweb_gbit = (uint8_t)(1u << (field_type - MWEB_GLOBAL_TX_OFFSET));
+                size_t val_len;
+                const unsigned char *val_p;
+
+                /* Duplicate check */
+                if (mweb_global_keyset & mweb_gbit) {
+                    ret = WALLY_EINVAL;
+                    break;
+                }
+                mweb_global_keyset |= mweb_gbit;
+
+                subfield_nomore_end(cursor, max, key, key_len);
+
+                switch (field_type) {
+                case MWEB_GLOBAL_TX_OFFSET:
+                    pull_varlength_buff(cursor, max, &val_p, &val_len);
+                    if (val_len != WALLY_TXHASH_LEN)
+                        ret = WALLY_EINVAL;
+                    else {
+                        memcpy((*output)->mweb_tx_offset, val_p, WALLY_TXHASH_LEN);
+                        (*output)->has_mweb_tx_offset = 1u;
+                    }
+                    break;
+                case MWEB_GLOBAL_STEALTH_OFFSET:
+                    pull_varlength_buff(cursor, max, &val_p, &val_len);
+                    if (val_len != WALLY_TXHASH_LEN)
+                        ret = WALLY_EINVAL;
+                    else {
+                        memcpy((*output)->mweb_stealth_offset, val_p, WALLY_TXHASH_LEN);
+                        (*output)->has_mweb_stealth_offset = 1u;
+                    }
+                    break;
+                case MWEB_GLOBAL_KERNEL_COUNT:
+                    (*output)->num_mweb_kernels = (size_t)pull_varint_subfield(cursor, max);
+                    (*output)->has_mweb_kernel_count = 1u;
+                    break;
+                }
+                pre_key = *cursor;
+                continue;
+            }
+#endif /* BUILD_MWEB */
         }
 
         /* Process based on type */
@@ -2800,6 +3150,13 @@ unknown:
             ret = WALLY_EINVAL; /* Disallowed field present */
     }
 
+#ifdef BUILD_MWEB
+    /* MWEB globals are disallowed in PSBTv0 */
+    if (ret == WALLY_OK && !(flags & WALLY_PSBT_PARSE_FLAG_LOOSE)
+        && (*output)->version == PSBT_0 && mweb_global_keyset)
+        ret = WALLY_EINVAL;
+#endif
+
     if (ret == WALLY_OK && (*output)->version == PSBT_2) {
         if ((*output)->tx_version < 2)
             ret = WALLY_EINVAL; /* Tx version must be >= 2 */
@@ -2827,6 +3184,21 @@ unknown:
     for (i = 0; ret == WALLY_OK && i < (*output)->num_outputs; ++i)
         ret = pull_psbt_output(*output, cursor, max, tx_flags, flags,
                                (*output)->outputs + i);
+
+#ifdef BUILD_MWEB
+    /* Read MWEB kernels (after outputs) */
+    if (ret == WALLY_OK && (*output)->num_mweb_kernels) {
+        size_t num_kernels = (*output)->num_mweb_kernels;
+        (*output)->mweb_kernels = wally_calloc(num_kernels * sizeof(struct wally_psbt_kernel));
+        if (!(*output)->mweb_kernels)
+            ret = WALLY_ENOMEM;
+        else {
+            (*output)->mweb_kernels_allocation_len = num_kernels;
+            for (i = 0; ret == WALLY_OK && i < num_kernels; ++i)
+                ret = pull_psbt_kernel(cursor, max, (*output)->mweb_kernels + i);
+        }
+    }
+#endif /* BUILD_MWEB */
 
     if (ret == WALLY_OK && !*cursor)
         ret = WALLY_EINVAL; /* Ran out of data */
@@ -3175,12 +3547,19 @@ static int push_psbt_input(const struct wally_psbt *psbt,
         return ret;
 
     if (psbt->version == PSBT_2) {
-        if (mem_is_zero(input->txhash, WALLY_TXHASH_LEN))
-            return WALLY_EINVAL; /* No previous txid provided */
-        push_psbt_varbuff(cursor, max, PSBT_IN_PREVIOUS_TXID, false,
-                          input->txhash, sizeof(input->txhash));
+#ifdef BUILD_MWEB
+        if (MWEB_IN_HAS_OUTPUT_ID(input->mweb_keyset)) {
+            /* Canonical MWEB input — no standard prevout */
+        } else
+#endif
+        {
+            if (mem_is_zero(input->txhash, WALLY_TXHASH_LEN))
+                return WALLY_EINVAL; /* No previous txid provided */
+            push_psbt_varbuff(cursor, max, PSBT_IN_PREVIOUS_TXID, false,
+                              input->txhash, sizeof(input->txhash));
 
-        push_psbt_le32(cursor, max, PSBT_IN_OUTPUT_INDEX, false, input->index);
+            push_psbt_le32(cursor, max, PSBT_IN_OUTPUT_INDEX, false, input->index);
+        }
 
         if (input->sequence != WALLY_TX_SEQUENCE_FINAL)
             push_psbt_le32(cursor, max, PSBT_IN_SEQUENCE, false, input->sequence);
@@ -3267,12 +3646,103 @@ static int push_psbt_input(const struct wally_psbt *psbt,
     }
 #endif /* BUILD_ELEMENTS */
 
+#ifdef BUILD_MWEB
+#define MWEB_HAS(ks, field) ((ks) & (1u << ((field) - MWEB_IN_MIN)))
+    if (input->mweb_keyset) {
+        const bool has_sig = MWEB_HAS(input->mweb_keyset, MWEB_IN_INPUT_SIGNATURE);
+
+        /* Always-present MWEB fields (use keyset bits, not mem_is_zero) */
+        if (MWEB_HAS(input->mweb_keyset, MWEB_IN_SPENT_OUTPUT_ID))
+            push_psbt_varbuff(cursor, max, MWEB_IN_SPENT_OUTPUT_ID, false,
+                              input->mweb_spent_output_id, WALLY_TXHASH_LEN);
+        if (MWEB_HAS(input->mweb_keyset, MWEB_IN_SPENT_OUTPUT_COMMIT))
+            push_psbt_varbuff(cursor, max, MWEB_IN_SPENT_OUTPUT_COMMIT, false,
+                              input->mweb_spent_output_commit, EC_PUBLIC_KEY_LEN);
+        if (MWEB_HAS(input->mweb_keyset, MWEB_IN_SPENT_OUTPUT_PUBKEY))
+            push_psbt_varbuff(cursor, max, MWEB_IN_SPENT_OUTPUT_PUBKEY, false,
+                              input->mweb_spent_output_pubkey, EC_PUBLIC_KEY_LEN);
+        if (MWEB_HAS(input->mweb_keyset, MWEB_IN_INPUT_PUBKEY))
+            push_psbt_varbuff(cursor, max, MWEB_IN_INPUT_PUBKEY, false,
+                              input->mweb_input_pubkey, EC_PUBLIC_KEY_LEN);
+        if (MWEB_HAS(input->mweb_keyset, MWEB_IN_INPUT_FEATURES)) {
+            push_psbt_key(cursor, max, MWEB_IN_INPUT_FEATURES, NULL, 0);
+            push_varint(cursor, max, sizeof(uint8_t));
+            push_u8(cursor, max, input->mweb_input_features);
+        }
+        if (has_sig)
+            push_psbt_varbuff(cursor, max, MWEB_IN_INPUT_SIGNATURE, false,
+                              input->mweb_input_signature, EC_SIGNATURE_LEN);
+
+        /* Presign-only fields: only when signature is NOT present */
+        if (!has_sig) {
+            if (MWEB_HAS(input->mweb_keyset, MWEB_IN_ADDRESS_INDEX))
+                push_psbt_le32(cursor, max, MWEB_IN_ADDRESS_INDEX, false, input->mweb_address_index);
+            if (MWEB_HAS(input->mweb_keyset, MWEB_IN_INPUT_AMOUNT))
+                push_psbt_le64(cursor, max, MWEB_IN_INPUT_AMOUNT, false, input->mweb_input_amount);
+            if (MWEB_HAS(input->mweb_keyset, MWEB_IN_SHARED_SECRET))
+                push_psbt_varbuff(cursor, max, MWEB_IN_SHARED_SECRET, false,
+                                  input->mweb_shared_secret, WALLY_TXHASH_LEN);
+            if (MWEB_HAS(input->mweb_keyset, MWEB_IN_KEY_EXCHANGE_PUBKEY))
+                push_psbt_varbuff(cursor, max, MWEB_IN_KEY_EXCHANGE_PUBKEY, false,
+                                  input->mweb_key_exchange_pubkey, EC_PUBLIC_KEY_LEN);
+            if (input->mweb_scan_key_origin.num_items)
+                push_psbt_map(cursor, max, MWEB_IN_MASTER_SCAN_KEY_ORIGIN, false,
+                              &input->mweb_scan_key_origin);
+            if (input->mweb_spend_key_origin.num_items)
+                push_psbt_map(cursor, max, MWEB_IN_MASTER_SPEND_KEY_ORIGIN, false,
+                              &input->mweb_spend_key_origin);
+        }
+
+        /* Extra data */
+        if (input->mweb_extra_data)
+            push_psbt_varbuff(cursor, max, MWEB_IN_EXTRA_DATA, false,
+                              input->mweb_extra_data, input->mweb_extra_data_len);
+    }
+#undef MWEB_HAS
+#endif /* BUILD_MWEB */
+
     /* Unknowns */
     push_map(cursor, max, &input->unknowns);
     /* Separator */
     push_u8(cursor, max, PSBT_SEPARATOR);
     return WALLY_OK;
 }
+
+#ifdef BUILD_MWEB
+static int push_psbt_kernel(unsigned char **cursor, size_t *max,
+                            const struct wally_psbt_kernel *kernel)
+{
+    if (kernel->has_excess_commitment)
+        push_psbt_varbuff(cursor, max, MWEB_KRN_EXCESS_COMMITMENT, false,
+                          kernel->excess_commitment, EC_PUBLIC_KEY_LEN);
+    if (kernel->has_stealth_excess)
+        push_psbt_varbuff(cursor, max, MWEB_KRN_STEALTH_EXCESS, false,
+                          kernel->stealth_excess, EC_PUBLIC_KEY_LEN);
+    if (kernel->has_fee)
+        push_psbt_le64(cursor, max, MWEB_KRN_FEE, false, kernel->fee);
+    if (kernel->has_pegin_amount)
+        push_psbt_le64(cursor, max, MWEB_KRN_PEGIN_AMOUNT, false, kernel->pegin_amount);
+    push_psbt_map(cursor, max, MWEB_KRN_PEGOUT, false, &kernel->pegouts);
+    if (kernel->has_lock_height)
+        push_psbt_le32(cursor, max, MWEB_KRN_LOCK_HEIGHT, false, kernel->lock_height);
+    if (kernel->has_features) {
+        push_psbt_key(cursor, max, MWEB_KRN_FEATURES, NULL, 0);
+        push_varint(cursor, max, sizeof(uint8_t));
+        push_u8(cursor, max, kernel->features);
+    }
+    if (kernel->extra_data)
+        push_psbt_varbuff(cursor, max, MWEB_KRN_EXTRA_DATA, false,
+                          kernel->extra_data, kernel->extra_data_len);
+    if (kernel->has_signature)
+        push_psbt_varbuff(cursor, max, MWEB_KRN_SIGNATURE, false,
+                          kernel->signature, EC_SIGNATURE_LEN);
+    /* Unknowns */
+    push_map(cursor, max, &kernel->unknowns);
+    /* Separator */
+    push_u8(cursor, max, PSBT_SEPARATOR);
+    return WALLY_OK;
+}
+#endif /* BUILD_MWEB */
 
 static int push_psbt_output(const struct wally_psbt *psbt,
                             unsigned char **cursor, size_t *max, bool is_pset,
@@ -3296,16 +3766,27 @@ static int push_psbt_output(const struct wally_psbt *psbt,
     push_psbt_map(cursor, max, PSBT_OUT_BIP32_DERIVATION, false, &output->keypaths);
 
     if (psbt->version == PSBT_2) {
-        if (!is_pset && (!output->has_amount || !output->script || !output->script_len))
+#ifdef BUILD_MWEB
+        const bool is_mweb_output = MWEB_OUT_IS_MWEB(output->mweb_output_keyset);
+#else
+        const bool is_mweb_output = false;
+#endif
+        if (!is_pset && !is_mweb_output &&
+            (!output->has_amount || !output->script || !output->script_len))
             return WALLY_EINVAL; /* Must be provided */
+        if (!is_pset && is_mweb_output && !output->has_amount)
+            return WALLY_EINVAL; /* MWEB outputs still require amount */
 
         if (output->has_amount)
             push_psbt_le64(cursor, max, PSBT_OUT_AMOUNT, false, output->amount);
 
-        /* Core/Elements always write the script; if missing its written as empty */
-        push_psbt_varbuff(cursor, max, PSBT_OUT_SCRIPT, false,
-                          output->script ? output->script : &dummy,
-                          output->script_len);
+        if (output->script || !is_mweb_output) {
+            /* Core/Elements always write the script; if missing its written as empty.
+             * MWEB outputs skip the script field entirely. */
+            push_psbt_varbuff(cursor, max, PSBT_OUT_SCRIPT, false,
+                              output->script ? output->script : &dummy,
+                              output->script_len);
+        }
     }
 
     if ((ret = push_varbuff_from_map(cursor, max, PSBT_OUT_TAP_INTERNAL_KEY,
@@ -3462,6 +3943,18 @@ int wally_psbt_to_bytes(const struct wally_psbt *psbt, uint32_t flags,
             push_varbuff(&cursor, &max, psbt->genesis_blockhash, sizeof(psbt->genesis_blockhash));
         }
 #endif /* BUILD_ELEMENTS */
+#ifdef BUILD_MWEB
+        if (psbt->has_mweb_tx_offset)
+            push_psbt_varbuff(&cursor, &max, MWEB_GLOBAL_TX_OFFSET, false,
+                              psbt->mweb_tx_offset, WALLY_TXHASH_LEN);
+        if (psbt->has_mweb_stealth_offset)
+            push_psbt_varbuff(&cursor, &max, MWEB_GLOBAL_STEALTH_OFFSET, false,
+                              psbt->mweb_stealth_offset, WALLY_TXHASH_LEN);
+        if (psbt->has_mweb_kernel_count) {
+            push_psbt_key(&cursor, &max, MWEB_GLOBAL_KERNEL_COUNT, NULL, 0);
+            push_varint_varbuff(&cursor, &max, psbt->num_mweb_kernels);
+        }
+#endif /* BUILD_MWEB */
     }
 
     if (psbt->version == PSBT_2)
@@ -3484,6 +3977,14 @@ int wally_psbt_to_bytes(const struct wally_psbt *psbt, uint32_t flags,
         if ((ret = push_psbt_output(psbt, &cursor, &max, !!is_pset, output)) != WALLY_OK)
             return ret;
     }
+
+#ifdef BUILD_MWEB
+    /* Push MWEB kernels after outputs */
+    for (i = 0; i < psbt->num_mweb_kernels; ++i) {
+        if ((ret = push_psbt_kernel(&cursor, &max, psbt->mweb_kernels + i)) != WALLY_OK)
+            return ret;
+    }
+#endif /* BUILD_MWEB */
 
     if (cursor == NULL) {
         /* Once cursor is NULL, max holds how many bytes we needed */
@@ -3715,6 +4216,72 @@ static int combine_input(struct wally_psbt_input *dst,
         }
 #endif /* BUILD_ELEMENTS */
     }
+#ifdef BUILD_MWEB
+#define MWEB_MERGE(ks, field, dst_f, src_f, sz) do { \
+    if (!((ks) & (1u << ((field) - MWEB_IN_MIN))) && \
+        (src->mweb_keyset & (1u << ((field) - MWEB_IN_MIN)))) { \
+        memcpy(dst_f, src_f, sz); \
+        (ks) |= (1u << ((field) - MWEB_IN_MIN)); \
+    } \
+} while(0)
+    if (ret == WALLY_OK && src->mweb_keyset) {
+        uint16_t dks = dst->mweb_keyset;
+        /* Merge each fixed-size field individually */
+        MWEB_MERGE(dks, MWEB_IN_SPENT_OUTPUT_ID, dst->mweb_spent_output_id, src->mweb_spent_output_id, WALLY_TXHASH_LEN);
+        MWEB_MERGE(dks, MWEB_IN_SPENT_OUTPUT_COMMIT, dst->mweb_spent_output_commit, src->mweb_spent_output_commit, EC_PUBLIC_KEY_LEN);
+        MWEB_MERGE(dks, MWEB_IN_SPENT_OUTPUT_PUBKEY, dst->mweb_spent_output_pubkey, src->mweb_spent_output_pubkey, EC_PUBLIC_KEY_LEN);
+        MWEB_MERGE(dks, MWEB_IN_INPUT_PUBKEY, dst->mweb_input_pubkey, src->mweb_input_pubkey, EC_PUBLIC_KEY_LEN);
+        if (!(dks & (1u << (MWEB_IN_INPUT_FEATURES - MWEB_IN_MIN))) &&
+            (src->mweb_keyset & (1u << (MWEB_IN_INPUT_FEATURES - MWEB_IN_MIN)))) {
+            dst->mweb_input_features = src->mweb_input_features;
+            dks |= (1u << (MWEB_IN_INPUT_FEATURES - MWEB_IN_MIN));
+        }
+        MWEB_MERGE(dks, MWEB_IN_INPUT_SIGNATURE, dst->mweb_input_signature, src->mweb_input_signature, EC_SIGNATURE_LEN);
+        if (!(dks & (1u << (MWEB_IN_ADDRESS_INDEX - MWEB_IN_MIN))) &&
+            (src->mweb_keyset & (1u << (MWEB_IN_ADDRESS_INDEX - MWEB_IN_MIN)))) {
+            dst->mweb_address_index = src->mweb_address_index;
+            dks |= (1u << (MWEB_IN_ADDRESS_INDEX - MWEB_IN_MIN));
+        }
+        if (!(dks & (1u << (MWEB_IN_INPUT_AMOUNT - MWEB_IN_MIN))) &&
+            (src->mweb_keyset & (1u << (MWEB_IN_INPUT_AMOUNT - MWEB_IN_MIN)))) {
+            dst->mweb_input_amount = src->mweb_input_amount;
+            dks |= (1u << (MWEB_IN_INPUT_AMOUNT - MWEB_IN_MIN));
+        }
+        MWEB_MERGE(dks, MWEB_IN_SHARED_SECRET, dst->mweb_shared_secret, src->mweb_shared_secret, WALLY_TXHASH_LEN);
+        MWEB_MERGE(dks, MWEB_IN_KEY_EXCHANGE_PUBKEY, dst->mweb_key_exchange_pubkey, src->mweb_key_exchange_pubkey, EC_PUBLIC_KEY_LEN);
+        dst->mweb_keyset = dks;
+
+        /* Singular keypath fields: copy only if dst is empty, reject if both
+         * have entries with different content (would create invalid duplicates) */
+        if (ret == WALLY_OK && !dst->mweb_scan_key_origin.num_items
+            && src->mweb_scan_key_origin.num_items)
+            ret = wally_map_combine(&dst->mweb_scan_key_origin, &src->mweb_scan_key_origin);
+        else if (ret == WALLY_OK && dst->mweb_scan_key_origin.num_items
+                 && src->mweb_scan_key_origin.num_items) {
+            /* Both have scan key origin: verify they match */
+            const struct wally_map_item *d = &dst->mweb_scan_key_origin.items[0];
+            const struct wally_map_item *s = &src->mweb_scan_key_origin.items[0];
+            if (d->key_len != s->key_len || memcmp(d->key, s->key, d->key_len)
+                || d->value_len != s->value_len || memcmp(d->value, s->value, d->value_len))
+                ret = WALLY_EINVAL; /* Mismatched singular keypath */
+        }
+        if (ret == WALLY_OK && !dst->mweb_spend_key_origin.num_items
+            && src->mweb_spend_key_origin.num_items)
+            ret = wally_map_combine(&dst->mweb_spend_key_origin, &src->mweb_spend_key_origin);
+        else if (ret == WALLY_OK && dst->mweb_spend_key_origin.num_items
+                 && src->mweb_spend_key_origin.num_items) {
+            const struct wally_map_item *d = &dst->mweb_spend_key_origin.items[0];
+            const struct wally_map_item *s = &src->mweb_spend_key_origin.items[0];
+            if (d->key_len != s->key_len || memcmp(d->key, s->key, d->key_len)
+                || d->value_len != s->value_len || memcmp(d->value, s->value, d->value_len))
+                ret = WALLY_EINVAL; /* Mismatched singular keypath */
+        }
+        if (ret == WALLY_OK && !dst->mweb_extra_data && src->mweb_extra_data)
+            ret = replace_bytes(src->mweb_extra_data, src->mweb_extra_data_len,
+                                &dst->mweb_extra_data, &dst->mweb_extra_data_len);
+    }
+#undef MWEB_MERGE
+#endif /* BUILD_MWEB */
     return ret;
 }
 
@@ -3772,6 +4339,9 @@ static int combine_output(struct wally_psbt_output *dst,
         ret = wally_map_combine(&dst->keypaths, &src->keypaths);
     if (ret == WALLY_OK)
         ret = wally_map_combine(&dst->unknowns, &src->unknowns);
+#ifdef BUILD_MWEB
+    dst->mweb_output_keyset |= src->mweb_output_keyset;
+#endif
     if (ret == WALLY_OK)
         ret = wally_map_combine(&dst->psbt_fields, &src->psbt_fields);
     if (ret == WALLY_OK)
@@ -3835,6 +4405,53 @@ static int combine_output(struct wally_psbt_output *dst,
     return ret;
 }
 
+#ifdef BUILD_MWEB
+/* Merge a single kernel: copy missing fields from src into dst */
+static int combine_kernel(struct wally_psbt_kernel *dst,
+                          const struct wally_psbt_kernel *src)
+{
+    int ret = WALLY_OK;
+
+    if (!dst->has_excess_commitment && src->has_excess_commitment) {
+        memcpy(dst->excess_commitment, src->excess_commitment, EC_PUBLIC_KEY_LEN);
+        dst->has_excess_commitment = 1u;
+    }
+    if (!dst->has_stealth_excess && src->has_stealth_excess) {
+        memcpy(dst->stealth_excess, src->stealth_excess, EC_PUBLIC_KEY_LEN);
+        dst->has_stealth_excess = 1u;
+    }
+    if (!dst->has_fee && src->has_fee) {
+        dst->fee = src->fee;
+        dst->has_fee = 1u;
+    }
+    if (!dst->has_pegin_amount && src->has_pegin_amount) {
+        dst->pegin_amount = src->pegin_amount;
+        dst->has_pegin_amount = 1u;
+    }
+    if (!dst->has_lock_height && src->has_lock_height) {
+        dst->lock_height = src->lock_height;
+        dst->has_lock_height = 1u;
+    }
+    if (!dst->has_features && src->has_features) {
+        dst->features = src->features;
+        dst->has_features = 1u;
+    }
+    if (!dst->has_signature && src->has_signature) {
+        memcpy(dst->signature, src->signature, EC_SIGNATURE_LEN);
+        dst->has_signature = 1u;
+    }
+    if ((ret = wally_map_combine(&dst->pegouts, &src->pegouts)) != WALLY_OK)
+        return ret;
+    if (!dst->extra_data && src->extra_data) {
+        ret = replace_bytes(src->extra_data, src->extra_data_len,
+                            &dst->extra_data, &dst->extra_data_len);
+        if (ret != WALLY_OK)
+            return ret;
+    }
+    return wally_map_combine(&dst->unknowns, &src->unknowns);
+}
+#endif /* BUILD_MWEB */
+
 static int psbt_combine(struct wally_psbt *psbt, const struct wally_psbt *src,
                         bool is_pset, bool for_clone)
 {
@@ -3872,6 +4489,53 @@ static int psbt_combine(struct wally_psbt *psbt, const struct wally_psbt *src,
         ret = wally_map_combine(&psbt->global_scalars, &src->global_scalars);
     }
 #endif /* BUILD_ELEMENTS */
+
+#ifdef BUILD_MWEB
+    if (ret == WALLY_OK) {
+        /* MWEB global offsets: copy if dst missing, reject if both differ */
+        if (!psbt->has_mweb_tx_offset && src->has_mweb_tx_offset) {
+            memcpy(psbt->mweb_tx_offset, src->mweb_tx_offset, WALLY_TXHASH_LEN);
+            psbt->has_mweb_tx_offset = 1u;
+        } else if (psbt->has_mweb_tx_offset && src->has_mweb_tx_offset
+                   && memcmp(psbt->mweb_tx_offset, src->mweb_tx_offset, WALLY_TXHASH_LEN)) {
+            ret = WALLY_EINVAL; /* Conflicting MWEB tx offsets */
+        }
+        if (ret == WALLY_OK && !psbt->has_mweb_stealth_offset && src->has_mweb_stealth_offset) {
+            memcpy(psbt->mweb_stealth_offset, src->mweb_stealth_offset, WALLY_TXHASH_LEN);
+            psbt->has_mweb_stealth_offset = 1u;
+        } else if (ret == WALLY_OK && psbt->has_mweb_stealth_offset && src->has_mweb_stealth_offset
+                   && memcmp(psbt->mweb_stealth_offset, src->mweb_stealth_offset, WALLY_TXHASH_LEN)) {
+            ret = WALLY_EINVAL; /* Conflicting MWEB stealth offsets */
+        }
+        if (ret == WALLY_OK && !psbt->has_mweb_kernel_count && src->has_mweb_kernel_count) {
+            psbt->has_mweb_kernel_count = 1u;
+            psbt->num_mweb_kernels = src->num_mweb_kernels;
+        }
+        /* Merge kernels */
+        if (ret == WALLY_OK && src->num_mweb_kernels && src->mweb_kernels) {
+            if (!psbt->mweb_kernels) {
+                /* dst has no kernels: clone from src */
+                psbt->mweb_kernels = wally_calloc(src->num_mweb_kernels * sizeof(struct wally_psbt_kernel));
+                if (!psbt->mweb_kernels)
+                    ret = WALLY_ENOMEM;
+                else {
+                    psbt->mweb_kernels_allocation_len = src->num_mweb_kernels;
+                    psbt->num_mweb_kernels = src->num_mweb_kernels;
+                    for (i = 0; ret == WALLY_OK && i < src->num_mweb_kernels; ++i) {
+                        psbt_kernel_init(&psbt->mweb_kernels[i]);
+                        ret = combine_kernel(&psbt->mweb_kernels[i], &src->mweb_kernels[i]);
+                    }
+                }
+            } else if (psbt->num_mweb_kernels == src->num_mweb_kernels) {
+                /* Both have kernels with matching count: merge kernel-by-kernel */
+                for (i = 0; ret == WALLY_OK && i < psbt->num_mweb_kernels; ++i)
+                    ret = combine_kernel(&psbt->mweb_kernels[i], &src->mweb_kernels[i]);
+            } else {
+                ret = WALLY_EINVAL; /* Mismatched kernel count */
+            }
+        }
+    }
+#endif /* BUILD_MWEB */
 
     return ret;
 }
