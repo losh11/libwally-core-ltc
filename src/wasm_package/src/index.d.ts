@@ -464,6 +464,8 @@ export function psbt_input_taproot_keypath_add(input: Ref_wally_psbt_input, pub_
 export function psbt_is_elements(psbt: Ref_wally_psbt): number;
 export function psbt_is_finalized(psbt: Ref_wally_psbt): number;
 export function psbt_is_input_finalized(psbt: Ref_wally_psbt, index: number): number;
+export function psbt_kernel_get_mweb_presign_stealth_key(kernel: Ref_wally_psbt_kernel): Buffer;
+export function psbt_kernel_set_mweb_presign_stealth_key(kernel: Ref_wally_psbt_kernel, bytes: Buffer|Uint8Array): void;
 export function psbt_output_clear_amount(output: Ref_wally_psbt_output): void;
 export function psbt_output_clear_asset(output: Ref_wally_psbt_output): void;
 export function psbt_output_clear_asset_blinding_surjectionproof(output: Ref_wally_psbt_output): void;
@@ -484,6 +486,7 @@ export function psbt_output_get_asset_surjectionproof_len(output: Ref_wally_psbt
 export function psbt_output_get_blinding_public_key_len(output: Ref_wally_psbt_output): number;
 export function psbt_output_get_blinding_status(output: Ref_wally_psbt_output, flags: number): number;
 export function psbt_output_get_ecdh_public_key_len(output: Ref_wally_psbt_output): number;
+export function psbt_output_get_mweb_presign_sender_key(output: Ref_wally_psbt_output): Buffer;
 export function psbt_output_get_value_blinding_rangeproof_len(output: Ref_wally_psbt_output): number;
 export function psbt_output_get_value_commitment_len(output: Ref_wally_psbt_output): number;
 export function psbt_output_get_value_rangeproof_len(output: Ref_wally_psbt_output): number;
@@ -497,6 +500,7 @@ export function psbt_output_set_blinder_index(output: Ref_wally_psbt_output, ind
 export function psbt_output_set_blinding_public_key(output: Ref_wally_psbt_output, pub_key: Buffer|Uint8Array): void;
 export function psbt_output_set_ecdh_public_key(output: Ref_wally_psbt_output, pub_key: Buffer|Uint8Array): void;
 export function psbt_output_set_keypaths(output: Ref_wally_psbt_output, map_in: Ref_wally_map): void;
+export function psbt_output_set_mweb_presign_sender_key(output: Ref_wally_psbt_output, bytes: Buffer|Uint8Array): void;
 export function psbt_output_set_redeem_script(output: Ref_wally_psbt_output, script: Buffer|Uint8Array): void;
 export function psbt_output_set_script(output: Ref_wally_psbt_output, script: Buffer|Uint8Array): void;
 export function psbt_output_set_taproot_internal_key(output: Ref_wally_psbt_output, pub_key: Buffer|Uint8Array): void;
@@ -575,6 +579,7 @@ export function psbt_sign_bip32(psbt: Ref_wally_psbt, hdkey: Ref_ext_key, flags:
 export function psbt_sign_input_bip32(psbt: Ref_wally_psbt, index: number, subindex: number, txhash: Buffer|Uint8Array, hdkey: Ref_ext_key, flags: number): void;
 export function psbt_signing_cache_disable(psbt: Ref_wally_psbt): void;
 export function psbt_signing_cache_enable(psbt: Ref_wally_psbt, flags: number): void;
+export function psbt_strip_mweb_presign_fields(psbt: Ref_wally_psbt): void;
 export function psbt_to_base64(psbt: Ref_wally_psbt, flags: number): string;
 export function ripemd160(bytes: Buffer|Uint8Array): Buffer;
 export function s2c_commitment_verify(sig: Buffer|Uint8Array, s2c_data: Buffer|Uint8Array, s2c_opening: Buffer|Uint8Array, flags: number): void;

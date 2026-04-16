@@ -322,12 +322,16 @@ EXPORTED_FUNCTIONS="['_malloc','_free','_bip32_key_free' \
 ,'_wally_psbt_is_elements' \
 ,'_wally_psbt_is_finalized' \
 ,'_wally_psbt_is_input_finalized' \
+,'_wally_psbt_kernel_get_mweb_presign_stealth_key' \
+,'_wally_psbt_kernel_set_mweb_presign_stealth_key' \
 ,'_wally_psbt_output_clear_amount' \
 ,'_wally_psbt_output_find_keypath' \
 ,'_wally_psbt_output_find_unknown' \
+,'_wally_psbt_output_get_mweb_presign_sender_key' \
 ,'_wally_psbt_output_keypath_add' \
 ,'_wally_psbt_output_set_amount' \
 ,'_wally_psbt_output_set_keypaths' \
+,'_wally_psbt_output_set_mweb_presign_sender_key' \
 ,'_wally_psbt_output_set_redeem_script' \
 ,'_wally_psbt_output_set_script' \
 ,'_wally_psbt_output_set_taproot_internal_key' \
@@ -371,6 +375,7 @@ EXPORTED_FUNCTIONS="['_malloc','_free','_bip32_key_free' \
 ,'_wally_psbt_sign_input_bip32' \
 ,'_wally_psbt_signing_cache_disable' \
 ,'_wally_psbt_signing_cache_enable' \
+,'_wally_psbt_strip_mweb_presign_fields' \
 ,'_wally_psbt_to_base64' \
 ,'_wally_psbt_to_bytes' \
 ,'_wally_ripemd160' \
