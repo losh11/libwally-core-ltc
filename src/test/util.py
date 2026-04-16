@@ -133,7 +133,31 @@ class wally_map(Structure):
                 ('items_allocation_len', c_size_t),
                 ('verify_fn', c_void_p)]
 
+class wally_psbt_kernel(Structure):
+    _fields_ = [('excess_commitment', c_ubyte * 33),
+                ('has_excess_commitment', c_uint32),
+                ('stealth_excess', c_ubyte * 33),
+                ('has_stealth_excess', c_uint32),
+                ('fee', c_uint64),
+                ('has_fee', c_uint32),
+                ('pegin_amount', c_uint64),
+                ('has_pegin_amount', c_uint32),
+                ('pegouts', wally_map),
+                ('lock_height', c_uint32),
+                ('has_lock_height', c_uint32),
+                ('features', c_uint8),
+                ('has_features', c_uint32),
+                ('extra_data', c_void_p),
+                ('extra_data_len', c_size_t),
+                ('signature', c_ubyte * 64),
+                ('has_signature', c_uint32),
+                ('unknowns', wally_map)]
+
 class wally_psbt_input(Structure):
+    # BUILD_MWEB fields are interleaved between the taproot fields and the
+    # Elements tail in the C layout. Mirror that exactly so the struct size
+    # and every field offset (including Elements members) stays correct
+    # when indexing past element 0.
     _fields_ = [('txhash', c_ubyte * 32),
                 ('index', c_uint32),
                 ('sequence', c_uint32),
@@ -152,6 +176,21 @@ class wally_psbt_input(Structure):
                 ('taproot_leaf_scripts', wally_map),
                 ('taproot_leaf_hashes', wally_map),
                 ('taproot_leaf_paths', wally_map),
+                ('mweb_spent_output_id', c_ubyte * 32),
+                ('mweb_spent_output_commit', c_ubyte * 33),
+                ('mweb_spent_output_pubkey', c_ubyte * 33),
+                ('mweb_input_pubkey', c_ubyte * 33),
+                ('mweb_input_features', c_uint8),
+                ('mweb_input_signature', c_ubyte * 64),
+                ('mweb_address_index', c_uint32),
+                ('mweb_input_amount', c_uint64),
+                ('mweb_shared_secret', c_ubyte * 32),
+                ('mweb_key_exchange_pubkey', c_ubyte * 33),
+                ('mweb_scan_key_origin', wally_map),
+                ('mweb_spend_key_origin', wally_map),
+                ('mweb_extra_data', c_void_p),
+                ('mweb_extra_data_len', c_size_t),
+                ('mweb_keyset', c_uint16),
                 ('issuance_amount', c_uint64),
                 ('inflation_keys', c_uint64),
                 ('pegin_amount', c_uint64),
@@ -162,6 +201,8 @@ class wally_psbt_input(Structure):
                 ('has_amount', c_uint32)]
 
 class wally_psbt_output(Structure):
+    # mweb_output_keyset is inserted between taproot_leaf_paths and the
+    # Elements blinder fields under BUILD_MWEB. Mirror the C layout exactly.
     _fields_ = [('keypaths', wally_map),
                 ('unknowns', wally_map),
                 ('amount', c_uint64),
@@ -172,11 +213,17 @@ class wally_psbt_output(Structure):
                 ('taproot_tree', wally_map),
                 ('taproot_leaf_hashes', wally_map),
                 ('taproot_leaf_paths', wally_map),
+                ('mweb_output_keyset', c_uint16),
                 ('blinder_index', c_uint32),
                 ('has_blinder_index', c_uint32),
                 ('pset_fields', wally_map)]
 
 class wally_psbt(Structure):
+    # Note: BUILD_MWEB fields are appended here to match the C layout
+    # when the library is built with BUILD_MWEB=1 (the only configuration
+    # these tests run under). The kernel pointer is kept as c_void_p
+    # because the wally_psbt_kernel struct is not bound in Python; tests
+    # pass the raw pointer to the C helpers that accept it.
     _fields_ = [('magic', c_ubyte * 5),
                 ('tx', POINTER(wally_tx)),
                 ('inputs', POINTER(wally_psbt_input)),
@@ -195,6 +242,14 @@ class wally_psbt(Structure):
                 ('global_scalars', wally_map),
                 ('pset_modifiable_flags', c_uint32),
                 ('genesis_blockhash', c_ubyte * 32),
+                ('mweb_tx_offset', c_ubyte * 32),
+                ('has_mweb_tx_offset', c_uint32),
+                ('mweb_stealth_offset', c_ubyte * 32),
+                ('has_mweb_stealth_offset', c_uint32),
+                ('mweb_kernels', POINTER(wally_psbt_kernel)),
+                ('num_mweb_kernels', c_size_t),
+                ('mweb_kernels_allocation_len', c_size_t),
+                ('has_mweb_kernel_count', c_uint32),
                 ('signing_cache', POINTER(wally_map))]
 
 for f in (
@@ -577,6 +632,8 @@ for f in (
     ('wally_psbt_is_elements', c_int, [POINTER(wally_psbt), c_size_t_p]),
     ('wally_psbt_is_finalized', c_int, [POINTER(wally_psbt), c_size_t_p]),
     ('wally_psbt_is_input_finalized', c_int, [POINTER(wally_psbt), c_size_t, c_size_t_p]),
+    ('wally_psbt_kernel_get_mweb_presign_stealth_key', c_int, [POINTER(wally_psbt_kernel), c_void_p, c_size_t, c_size_t_p]),
+    ('wally_psbt_kernel_set_mweb_presign_stealth_key', c_int, [POINTER(wally_psbt_kernel), c_void_p, c_size_t]),
     ('wally_psbt_output_clear_amount', c_int, [POINTER(wally_psbt_output)]),
     ('wally_psbt_output_clear_asset', c_int, [POINTER(wally_psbt_output)]),
     ('wally_psbt_output_clear_asset_blinding_surjectionproof', c_int, [POINTER(wally_psbt_output)]),
@@ -603,6 +660,7 @@ for f in (
     ('wally_psbt_output_get_blinding_status', c_int, [POINTER(wally_psbt_output), c_uint32, c_size_t_p]),
     ('wally_psbt_output_get_ecdh_public_key', c_int, [POINTER(wally_psbt_output), c_void_p, c_size_t, c_size_t_p]),
     ('wally_psbt_output_get_ecdh_public_key_len', c_int, [POINTER(wally_psbt_output), c_size_t_p]),
+    ('wally_psbt_output_get_mweb_presign_sender_key', c_int, [POINTER(wally_psbt_output), c_void_p, c_size_t, c_size_t_p]),
     ('wally_psbt_output_get_value_blinding_rangeproof', c_int, [POINTER(wally_psbt_output), c_void_p, c_size_t, c_size_t_p]),
     ('wally_psbt_output_get_value_blinding_rangeproof_len', c_int, [POINTER(wally_psbt_output), c_size_t_p]),
     ('wally_psbt_output_get_value_commitment', c_int, [POINTER(wally_psbt_output), c_void_p, c_size_t, c_size_t_p]),
@@ -619,6 +677,7 @@ for f in (
     ('wally_psbt_output_set_blinding_public_key', c_int, [POINTER(wally_psbt_output), c_void_p, c_size_t]),
     ('wally_psbt_output_set_ecdh_public_key', c_int, [POINTER(wally_psbt_output), c_void_p, c_size_t]),
     ('wally_psbt_output_set_keypaths', c_int, [POINTER(wally_psbt_output), POINTER(wally_map)]),
+    ('wally_psbt_output_set_mweb_presign_sender_key', c_int, [POINTER(wally_psbt_output), c_void_p, c_size_t]),
     ('wally_psbt_output_set_redeem_script', c_int, [POINTER(wally_psbt_output), c_void_p, c_size_t]),
     ('wally_psbt_output_set_script', c_int, [POINTER(wally_psbt_output), c_void_p, c_size_t]),
     ('wally_psbt_output_set_taproot_internal_key', c_int, [POINTER(wally_psbt_output), c_void_p, c_size_t]),
@@ -643,6 +702,7 @@ for f in (
     ('wally_psbt_sign_input_bip32', c_int, [POINTER(wally_psbt), c_size_t, c_size_t, c_void_p, c_size_t, POINTER(ext_key), c_uint32]),
     ('wally_psbt_signing_cache_disable', c_int, [POINTER(wally_psbt)]),
     ('wally_psbt_signing_cache_enable', c_int, [POINTER(wally_psbt), c_uint32]),
+    ('wally_psbt_strip_mweb_presign_fields', c_int, [POINTER(wally_psbt)]),
     ('wally_psbt_to_base64', c_int, [POINTER(wally_psbt), c_uint32, c_char_p_p]),
     ('wally_psbt_to_bytes', c_int, [POINTER(wally_psbt), c_uint32, c_void_p, c_size_t, c_size_t_p]),
     ('wally_ripemd160', c_int, [c_void_p, c_size_t, c_void_p, c_size_t]),

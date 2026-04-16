@@ -62,6 +62,16 @@ extern "C" {
 #define WALLY_SCALAR_OFFSET_LEN 32 /* Length of a PSET scalar offset */
 
 #ifdef BUILD_MWEB
+/* MWEB presign proprietary-field identifiers.
+ * Layout: key = [WALLY_PSBT_PROPRIETARY_TYPE (0xFC)] [varint(prefix_len=4)]
+ *               ['J' 'A' 'D' 'E'] [varint(subtype)] and value = 32-byte scalar.
+ * Used by Jade to carry presign scalars to the hardware signer. */
+#define WALLY_PSBT_MWEB_PRESIGN_PREFIX "JADE"
+#define WALLY_PSBT_MWEB_PRESIGN_PREFIX_LEN 4
+#define WALLY_PSBT_MWEB_PRESIGN_OUT_SENDER_KEY 0x01  /* Per-output senderKey (32B) */
+#define WALLY_PSBT_MWEB_PRESIGN_KRN_STEALTH_KEY 0x02 /* Per-kernel stealthKey (32B) */
+#define WALLY_PSBT_MWEB_PRESIGN_SCALAR_LEN 32
+
 /** An MWEB kernel in a PSBT */
 struct wally_psbt_kernel {
     unsigned char excess_commitment[EC_PUBLIC_KEY_LEN]; /* 33 bytes */
@@ -2798,6 +2808,77 @@ WALLY_CORE_API int wally_psbt_extract(
 WALLY_CORE_API int wally_psbt_is_elements(
     const struct wally_psbt *psbt,
     size_t *written);
+
+#ifdef BUILD_MWEB
+/**
+ * Get the MWEB presign senderKey from an output (proprietary key 0xFC "JADE" 0x01).
+ *
+ * :param output: The output to read.
+ * :param bytes_out: Destination buffer for the 32-byte senderKey.
+ * FIXED_SIZED_OUTPUT(len, bytes_out, WALLY_PSBT_MWEB_PRESIGN_SCALAR_LEN)
+ * :param written: Set to ``WALLY_PSBT_MWEB_PRESIGN_SCALAR_LEN`` on success, or 0 if the field is absent.
+ *
+ * .. note:: Returns ``WALLY_EINVAL`` if the field is present but has the wrong length.
+ *|    Scalar validity (non-zero, less than the curve order) is NOT checked here;
+ *|    that is enforced at the point of use on-device.
+ */
+WALLY_CORE_API int wally_psbt_output_get_mweb_presign_sender_key(
+    const struct wally_psbt_output *output,
+    unsigned char *bytes_out,
+    size_t len,
+    size_t *written);
+
+/**
+ * Set the MWEB presign senderKey on an output (proprietary key 0xFC "JADE" 0x01).
+ *
+ * :param output: The output to update.
+ * :param bytes: The 32-byte senderKey scalar, or NULL to clear the field.
+ * :param bytes_len: Length of ``bytes`` in bytes. Must be 0 (to clear) or ``WALLY_PSBT_MWEB_PRESIGN_SCALAR_LEN``.
+ */
+WALLY_CORE_API int wally_psbt_output_set_mweb_presign_sender_key(
+    struct wally_psbt_output *output,
+    const unsigned char *bytes,
+    size_t bytes_len);
+
+/**
+ * Get the MWEB presign stealthKey from a kernel (proprietary key 0xFC "JADE" 0x02).
+ *
+ * :param kernel: The kernel to read.
+ * :param bytes_out: Destination buffer for the 32-byte stealthKey.
+ * FIXED_SIZED_OUTPUT(len, bytes_out, WALLY_PSBT_MWEB_PRESIGN_SCALAR_LEN)
+ * :param written: Set to ``WALLY_PSBT_MWEB_PRESIGN_SCALAR_LEN`` on success, or 0 if the field is absent.
+ */
+WALLY_CORE_API int wally_psbt_kernel_get_mweb_presign_stealth_key(
+    const struct wally_psbt_kernel *kernel,
+    unsigned char *bytes_out,
+    size_t len,
+    size_t *written);
+
+/**
+ * Set the MWEB presign stealthKey on a kernel (proprietary key 0xFC "JADE" 0x02).
+ *
+ * :param kernel: The kernel to update.
+ * :param bytes: The 32-byte stealthKey scalar, or NULL to clear the field.
+ * :param bytes_len: Length of ``bytes`` in bytes. Must be 0 (to clear) or ``WALLY_PSBT_MWEB_PRESIGN_SCALAR_LEN``.
+ */
+WALLY_CORE_API int wally_psbt_kernel_set_mweb_presign_stealth_key(
+    struct wally_psbt_kernel *kernel,
+    const unsigned char *bytes,
+    size_t bytes_len);
+
+/**
+ * Strip all Jade MWEB presign fields from a PSBT.
+ *
+ * Clears ``0xFC "JADE" 0x01`` on every output (senderKey), ``0xFC "JADE" 0x02``
+ * on every kernel (stealthKey), and ``MWEB_IN_INPUT_AMOUNT`` (0x97) on every input.
+ * Does NOT touch the mandatory PSBTv2 ``AmountOutputType`` (0x03) on outputs,
+ * nor any other MWEB field.
+ *
+ * :param psbt: The PSBT to strip.
+ */
+WALLY_CORE_API int wally_psbt_strip_mweb_presign_fields(
+    struct wally_psbt *psbt);
+#endif /* BUILD_MWEB */
 
 #ifdef __cplusplus
 }

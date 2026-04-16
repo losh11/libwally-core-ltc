@@ -6751,3 +6751,148 @@ int wally_psbt_get_output_blinding_status(const struct wally_psbt *psbt, size_t 
 }
 #undef MAX_INVALID_SATOSHI
 #endif /* WALLY_ABI_NO_ELEMENTS */
+
+#ifdef BUILD_MWEB
+/* Build the 7-byte proprietary key bytes for a Jade MWEB presign field:
+ *   [0xFC] [varint(4)=0x04] ['J' 'A' 'D' 'E'] [varint(subtype)]
+ * `subtype` is assumed to be a single-byte varint (< 0xFD), which is
+ * currently the case for all defined subtypes (0x01, 0x02). */
+#define MWEB_PRESIGN_KEY_LEN 7u
+static void build_mweb_presign_key(uint8_t subtype, unsigned char out[MWEB_PRESIGN_KEY_LEN])
+{
+    out[0] = WALLY_PSBT_PROPRIETARY_TYPE;
+    out[1] = WALLY_PSBT_MWEB_PRESIGN_PREFIX_LEN;
+    out[2] = 'J';
+    out[3] = 'A';
+    out[4] = 'D';
+    out[5] = 'E';
+    out[6] = subtype;
+}
+
+static int mweb_presign_get(const struct wally_map *unknowns, uint8_t subtype,
+                            unsigned char *bytes_out, size_t len, size_t *written)
+{
+    unsigned char key[MWEB_PRESIGN_KEY_LEN];
+    const struct wally_map_item *item;
+
+    if (written) *written = 0;
+    if (!unknowns || !bytes_out || len != WALLY_PSBT_MWEB_PRESIGN_SCALAR_LEN || !written)
+        return WALLY_EINVAL;
+
+    build_mweb_presign_key(subtype, key);
+    item = wally_map_get(unknowns, key, MWEB_PRESIGN_KEY_LEN);
+    if (!item)
+        return WALLY_OK; /* Absent; *written stays 0 */
+    if (item->value_len != WALLY_PSBT_MWEB_PRESIGN_SCALAR_LEN)
+        return WALLY_EINVAL;
+    memcpy(bytes_out, item->value, WALLY_PSBT_MWEB_PRESIGN_SCALAR_LEN);
+    *written = WALLY_PSBT_MWEB_PRESIGN_SCALAR_LEN;
+    return WALLY_OK;
+}
+
+static int mweb_presign_set(struct wally_map *unknowns, uint8_t subtype,
+                            const unsigned char *bytes, size_t bytes_len)
+{
+    unsigned char key[MWEB_PRESIGN_KEY_LEN];
+
+    if (!unknowns)
+        return WALLY_EINVAL;
+    if (bytes_len == 0)
+        bytes = NULL;
+    if (bytes_len != 0 && (!bytes || bytes_len != WALLY_PSBT_MWEB_PRESIGN_SCALAR_LEN))
+        return WALLY_EINVAL;
+
+    build_mweb_presign_key(subtype, key);
+    if (!bytes)
+        return wally_map_remove(unknowns, key, MWEB_PRESIGN_KEY_LEN);
+    return wally_map_replace(unknowns, key, MWEB_PRESIGN_KEY_LEN, bytes, bytes_len);
+}
+
+int wally_psbt_output_get_mweb_presign_sender_key(
+    const struct wally_psbt_output *output,
+    unsigned char *bytes_out, size_t len, size_t *written)
+{
+    if (!output) {
+        if (written) *written = 0;
+        return WALLY_EINVAL;
+    }
+    return mweb_presign_get(&output->unknowns,
+                            WALLY_PSBT_MWEB_PRESIGN_OUT_SENDER_KEY,
+                            bytes_out, len, written);
+}
+
+int wally_psbt_output_set_mweb_presign_sender_key(
+    struct wally_psbt_output *output,
+    const unsigned char *bytes, size_t bytes_len)
+{
+    if (!output)
+        return WALLY_EINVAL;
+    return mweb_presign_set(&output->unknowns,
+                            WALLY_PSBT_MWEB_PRESIGN_OUT_SENDER_KEY,
+                            bytes, bytes_len);
+}
+
+int wally_psbt_kernel_get_mweb_presign_stealth_key(
+    const struct wally_psbt_kernel *kernel,
+    unsigned char *bytes_out, size_t len, size_t *written)
+{
+    if (!kernel) {
+        if (written) *written = 0;
+        return WALLY_EINVAL;
+    }
+    return mweb_presign_get(&kernel->unknowns,
+                            WALLY_PSBT_MWEB_PRESIGN_KRN_STEALTH_KEY,
+                            bytes_out, len, written);
+}
+
+int wally_psbt_kernel_set_mweb_presign_stealth_key(
+    struct wally_psbt_kernel *kernel,
+    const unsigned char *bytes, size_t bytes_len)
+{
+    if (!kernel)
+        return WALLY_EINVAL;
+    return mweb_presign_set(&kernel->unknowns,
+                            WALLY_PSBT_MWEB_PRESIGN_KRN_STEALTH_KEY,
+                            bytes, bytes_len);
+}
+
+int wally_psbt_strip_mweb_presign_fields(struct wally_psbt *psbt)
+{
+    size_t i;
+    int ret;
+    unsigned char sender_key[MWEB_PRESIGN_KEY_LEN];
+    unsigned char stealth_key[MWEB_PRESIGN_KEY_LEN];
+
+    if (!psbt)
+        return WALLY_EINVAL;
+
+    build_mweb_presign_key(WALLY_PSBT_MWEB_PRESIGN_OUT_SENDER_KEY, sender_key);
+    build_mweb_presign_key(WALLY_PSBT_MWEB_PRESIGN_KRN_STEALTH_KEY, stealth_key);
+
+    for (i = 0; i < psbt->num_outputs; ++i) {
+        ret = wally_map_remove(&psbt->outputs[i].unknowns,
+                               sender_key, MWEB_PRESIGN_KEY_LEN);
+        if (ret != WALLY_OK)
+            return ret;
+    }
+
+    for (i = 0; i < psbt->num_mweb_kernels; ++i) {
+        ret = wally_map_remove(&psbt->mweb_kernels[i].unknowns,
+                               stealth_key, MWEB_PRESIGN_KEY_LEN);
+        if (ret != WALLY_OK)
+            return ret;
+    }
+
+    for (i = 0; i < psbt->num_inputs; ++i) {
+        struct wally_psbt_input *inp = &psbt->inputs[i];
+        const uint16_t amount_bit = (uint16_t)(1u << (MWEB_IN_INPUT_AMOUNT - MWEB_IN_MIN));
+        if (inp->mweb_keyset & amount_bit) {
+            inp->mweb_input_amount = 0;
+            inp->mweb_keyset &= (uint16_t)~amount_bit;
+        }
+    }
+
+    return WALLY_OK;
+}
+#undef MWEB_PRESIGN_KEY_LEN
+#endif /* BUILD_MWEB */

@@ -441,5 +441,471 @@ class PSBTTests(unittest.TestCase):
         serialized = self.to_base64(psbt, None, SERIALIZE_FLAG_REDUNDANT)
         self.assertNotEqual(serialized, b64)
 
+SCALAR_LEN = 32
+SENDER_KEY = bytes([0xa1] * SCALAR_LEN)
+STEALTH_KEY = bytes([0xb2] * SCALAR_LEN)
+OUT_JADE_KEY = bytes([0xfc, 0x04]) + b'JADE' + bytes([0x01])
+KRN_JADE_KEY = bytes([0xfc, 0x04]) + b'JADE' + bytes([0x02])
+MWEB_INPUT_AMOUNT = 500000000
+MWEB_INPUT_OUTPUT_ID = bytes([0xc1] * 32)
+MWEB_OUT_STEALTH_ADDR = bytes([0xd2] * 66)   # 33 scan pubkey || 33 spend pubkey
+MWEB_OUT_COMMIT = bytes([0xd3] * 33)
+
+
+def _varint(n):
+    if n < 0xfd:
+        return bytes([n])
+    if n <= 0xffff:
+        return bytes([0xfd]) + n.to_bytes(2, 'little')
+    if n <= 0xffffffff:
+        return bytes([0xfe]) + n.to_bytes(4, 'little')
+    return bytes([0xff]) + n.to_bytes(8, 'little')
+
+
+def _varbuff(data):
+    return _varint(len(data)) + bytes(data)
+
+
+def _build_psbt_with_mweb_kernel(sender_key=SENDER_KEY, stealth_key=STEALTH_KEY,
+                                 output_amount=123456789,
+                                 mweb_input=True, mweb_output=True,
+                                 include_input_amount=True):
+    """Build a PSBTv2 whose shape exercises the strip helper's full contract:
+    one MWEB input (carrying MWEB_IN_SPENT_OUTPUT_ID and optionally
+    MWEB_IN_INPUT_AMOUNT), one output (MWEB-shaped by default: stealth
+    address + commit), and one MWEB kernel carrying the JADE presign field.
+
+    Flags:
+      - sender_key/stealth_key: None to omit the JADE presign field.
+      - mweb_input=False: build a 0-input PSBT (still has MWEB kernel).
+      - mweb_output=False: fall back to a standard output with 1-byte
+        script (keeps the fixture small for the output-helper tests).
+      - include_input_amount=False: omit MWEB_IN_INPUT_AMOUNT (0x97) on
+        the input. Only meaningful when mweb_input=True."""
+    magic = b'psbt\xff'
+    num_inputs = 1 if mweb_input else 0
+
+    # Globals
+    globals_bytes = (
+        _varbuff(bytes([0xfb])) + _varbuff((2).to_bytes(4, 'little'))         # PSBT_GLOBAL_VERSION = 2
+      + _varbuff(bytes([0x02])) + _varbuff((2).to_bytes(4, 'little'))         # PSBT_GLOBAL_TX_VERSION = 2
+      + _varbuff(bytes([0x04])) + _varbuff(bytes([num_inputs]))               # PSBT_GLOBAL_INPUT_COUNT
+      + _varbuff(bytes([0x05])) + _varbuff(bytes([0x01]))                     # PSBT_GLOBAL_OUTPUT_COUNT = 1
+      + _varbuff(bytes([0x92])) + _varbuff(bytes([0x01]))                     # MWEB_GLOBAL_KERNEL_COUNT = 1
+      + bytes([0x00])                                                         # separator
+    )
+
+    # Input 0 (optional). MWEB_IN_SPENT_OUTPUT_ID (0x90) marks the input
+    # canonical MWEB so the parser drops the v2 txid/vout requirements.
+    input_bytes = b''
+    if mweb_input:
+        input_bytes += _varbuff(bytes([0x90])) + _varbuff(MWEB_INPUT_OUTPUT_ID)
+        if include_input_amount:
+            input_bytes += (_varbuff(bytes([0x97]))
+                          + _varbuff(MWEB_INPUT_AMOUNT.to_bytes(8, 'little')))
+        input_bytes += bytes([0x00])  # separator
+
+    # Output 0. MWEB-shaped by default (stealth address 0x90 + commit 0x91).
+    output_bytes = (
+        _varbuff(bytes([0x03])) + _varbuff(output_amount.to_bytes(8, 'little'))  # PSBT_OUT_AMOUNT
+    )
+    if mweb_output:
+        output_bytes += _varbuff(bytes([0x90])) + _varbuff(MWEB_OUT_STEALTH_ADDR)
+        output_bytes += _varbuff(bytes([0x91])) + _varbuff(MWEB_OUT_COMMIT)
+    else:
+        output_bytes += _varbuff(bytes([0x04])) + _varbuff(bytes([0x51]))        # OP_1 script
+    if sender_key is not None:
+        output_bytes += _varbuff(OUT_JADE_KEY) + _varbuff(sender_key)
+    output_bytes += bytes([0x00])  # separator
+
+    # Kernel 0
+    kernel_bytes = b''
+    if stealth_key is not None:
+        kernel_bytes += _varbuff(KRN_JADE_KEY) + _varbuff(stealth_key)
+    kernel_bytes += bytes([0x00])  # separator
+
+    return magic + globals_bytes + input_bytes + output_bytes + kernel_bytes
+
+
+class MWEBPresignTests(unittest.TestCase):
+    """Commit 1: libwally presign proprietary-key helpers.
+
+    Covers round-trip, length validation, setter/getter symmetry, and the
+    strip helper's exact scope (clears 0xFC "JADE" 0x01 / 0x02 plus the
+    input MWEB_IN_INPUT_AMOUNT field, preserves everything else)."""
+
+    def parse_bytes(self, data):
+        psbt = pointer(wally_psbt())
+        ret = wally_psbt_from_bytes(data, len(data), 0, psbt)
+        self.assertEqual(ret, WALLY_OK)
+        return psbt
+
+    def serialize(self, psbt):
+        buf, buf_len = make_cbuffer('00' * 4096)
+        ret, written = wally_psbt_to_bytes(psbt, 0, buf, buf_len)
+        self.assertEqual(ret, WALLY_OK)
+        return bytes(buf[:written])
+
+    def test_output_senderkey_roundtrip(self):
+        raw = _build_psbt_with_mweb_kernel()
+        psbt = self.parse_bytes(raw)
+        try:
+            # Serialise, re-parse, serialise again: the second serialisation
+            # is byte-identical (idempotency), and the JADE proprietary key
+            # is present in the wire output.
+            first = self.serialize(psbt)
+            self.assertIn(b'JADE', first)
+            psbt2 = self.parse_bytes(first)
+            try:
+                self.assertEqual(self.serialize(psbt2), first)
+            finally:
+                wally_psbt_free(psbt2)
+
+            # Getter returns the value we put in.
+            out = psbt.contents.outputs[0]
+            buf, buf_len = make_cbuffer('00' * SCALAR_LEN)
+            ret, written = wally_psbt_output_get_mweb_presign_sender_key(out, buf, buf_len)
+            self.assertEqual(ret, WALLY_OK)
+            self.assertEqual(written, SCALAR_LEN)
+            self.assertEqual(bytes(buf[:written]), SENDER_KEY)
+        finally:
+            wally_psbt_free(psbt)
+
+    def test_output_senderkey_absent(self):
+        raw = _build_psbt_with_mweb_kernel(sender_key=None)
+        psbt = self.parse_bytes(raw)
+        try:
+            out = psbt.contents.outputs[0]
+            buf, buf_len = make_cbuffer('00' * SCALAR_LEN)
+            ret, written = wally_psbt_output_get_mweb_presign_sender_key(out, buf, buf_len)
+            self.assertEqual(ret, WALLY_OK)
+            self.assertEqual(written, 0)
+        finally:
+            wally_psbt_free(psbt)
+
+    def test_output_senderkey_set_and_clear(self):
+        # Start without the field.
+        raw = _build_psbt_with_mweb_kernel(sender_key=None)
+        psbt = self.parse_bytes(raw)
+        try:
+            out = psbt.contents.outputs[0]
+            new_key = bytes([0x5a] * SCALAR_LEN)
+            key_buf, key_buf_len = make_cbuffer(hexlify(new_key).decode())
+
+            # Setter adds it.
+            self.assertEqual(WALLY_OK,
+                wally_psbt_output_set_mweb_presign_sender_key(out, key_buf, key_buf_len))
+            out_buf, out_buf_len = make_cbuffer('00' * SCALAR_LEN)
+            ret, written = wally_psbt_output_get_mweb_presign_sender_key(out, out_buf, out_buf_len)
+            self.assertEqual(ret, WALLY_OK)
+            self.assertEqual(written, SCALAR_LEN)
+            self.assertEqual(bytes(out_buf[:written]), new_key)
+
+            # Setter with NULL clears it.
+            self.assertEqual(WALLY_OK,
+                wally_psbt_output_set_mweb_presign_sender_key(out, None, 0))
+            ret, written = wally_psbt_output_get_mweb_presign_sender_key(out, out_buf, out_buf_len)
+            self.assertEqual(ret, WALLY_OK)
+            self.assertEqual(written, 0)
+        finally:
+            wally_psbt_free(psbt)
+
+    def test_output_senderkey_setter_rejects_bad_length(self):
+        raw = _build_psbt_with_mweb_kernel(sender_key=None)
+        psbt = self.parse_bytes(raw)
+        try:
+            out = psbt.contents.outputs[0]
+            for bad_len in (1, 16, 31, 33, 64):
+                buf, buf_len = make_cbuffer('aa' * bad_len)
+                self.assertEqual(WALLY_EINVAL,
+                    wally_psbt_output_set_mweb_presign_sender_key(out, buf, buf_len))
+        finally:
+            wally_psbt_free(psbt)
+
+    def test_output_senderkey_getter_rejects_bad_buffer_len(self):
+        raw = _build_psbt_with_mweb_kernel()
+        psbt = self.parse_bytes(raw)
+        try:
+            out = psbt.contents.outputs[0]
+            for bad_len in (0, 31, 33, 64):
+                buf, buf_len = make_cbuffer('00' * max(bad_len, 1))
+                ret, _ = wally_psbt_output_get_mweb_presign_sender_key(out, buf, bad_len)
+                self.assertEqual(ret, WALLY_EINVAL)
+        finally:
+            wally_psbt_free(psbt)
+
+    def test_output_senderkey_getter_null_output(self):
+        buf, buf_len = make_cbuffer('00' * SCALAR_LEN)
+        ret, _ = wally_psbt_output_get_mweb_presign_sender_key(None, buf, buf_len)
+        self.assertEqual(ret, WALLY_EINVAL)
+
+    def test_output_senderkey_rejects_malformed_value_len(self):
+        # A proprietary key is present but with a bad value length (31B).
+        # The getter (length validation only) must reject it.
+        magic = b'psbt\xff'
+        globals_bytes = (
+            _varbuff(bytes([0xfb])) + _varbuff((2).to_bytes(4, 'little'))
+          + _varbuff(bytes([0x02])) + _varbuff((2).to_bytes(4, 'little'))
+          + _varbuff(bytes([0x04])) + _varbuff(bytes([0x00]))
+          + _varbuff(bytes([0x05])) + _varbuff(bytes([0x01]))
+          + bytes([0x00])
+        )
+        bad_key = bytes([0xaa] * 31)
+        output_bytes = (
+            _varbuff(bytes([0x03])) + _varbuff((1).to_bytes(8, 'little'))
+          + _varbuff(bytes([0x04])) + _varbuff(bytes([0x51]))
+          + _varbuff(OUT_JADE_KEY) + _varbuff(bad_key)
+          + bytes([0x00])
+        )
+        raw = magic + globals_bytes + output_bytes
+        psbt = self.parse_bytes(raw)
+        try:
+            out = psbt.contents.outputs[0]
+            buf, buf_len = make_cbuffer('00' * SCALAR_LEN)
+            ret, _ = wally_psbt_output_get_mweb_presign_sender_key(out, buf, buf_len)
+            self.assertEqual(ret, WALLY_EINVAL)
+        finally:
+            wally_psbt_free(psbt)
+
+    def test_kernel_stealthkey_roundtrip(self):
+        raw = _build_psbt_with_mweb_kernel()
+        psbt = self.parse_bytes(raw)
+        try:
+            self.assertEqual(psbt.contents.num_mweb_kernels, 1)
+            kernel_ptr = psbt.contents.mweb_kernels
+            self.assertNotEqual(kernel_ptr, None)
+
+            buf, buf_len = make_cbuffer('00' * SCALAR_LEN)
+            ret, written = wally_psbt_kernel_get_mweb_presign_stealth_key(kernel_ptr, buf, buf_len)
+            self.assertEqual(ret, WALLY_OK)
+            self.assertEqual(written, SCALAR_LEN)
+            self.assertEqual(bytes(buf[:written]), STEALTH_KEY)
+        finally:
+            wally_psbt_free(psbt)
+
+    def test_kernel_stealthkey_absent(self):
+        raw = _build_psbt_with_mweb_kernel(stealth_key=None)
+        psbt = self.parse_bytes(raw)
+        try:
+            kernel_ptr = psbt.contents.mweb_kernels
+            buf, buf_len = make_cbuffer('00' * SCALAR_LEN)
+            ret, written = wally_psbt_kernel_get_mweb_presign_stealth_key(kernel_ptr, buf, buf_len)
+            self.assertEqual(ret, WALLY_OK)
+            self.assertEqual(written, 0)
+        finally:
+            wally_psbt_free(psbt)
+
+    def test_kernel_stealthkey_set_and_clear(self):
+        raw = _build_psbt_with_mweb_kernel(stealth_key=None)
+        psbt = self.parse_bytes(raw)
+        try:
+            kernel_ptr = psbt.contents.mweb_kernels
+            new_key = bytes([0x7c] * SCALAR_LEN)
+            key_buf, key_buf_len = make_cbuffer(hexlify(new_key).decode())
+
+            self.assertEqual(WALLY_OK,
+                wally_psbt_kernel_set_mweb_presign_stealth_key(kernel_ptr, key_buf, key_buf_len))
+            out_buf, out_buf_len = make_cbuffer('00' * SCALAR_LEN)
+            ret, written = wally_psbt_kernel_get_mweb_presign_stealth_key(kernel_ptr, out_buf, out_buf_len)
+            self.assertEqual(ret, WALLY_OK)
+            self.assertEqual(written, SCALAR_LEN)
+            self.assertEqual(bytes(out_buf[:written]), new_key)
+
+            self.assertEqual(WALLY_OK,
+                wally_psbt_kernel_set_mweb_presign_stealth_key(kernel_ptr, None, 0))
+            ret, written = wally_psbt_kernel_get_mweb_presign_stealth_key(kernel_ptr, out_buf, out_buf_len)
+            self.assertEqual(ret, WALLY_OK)
+            self.assertEqual(written, 0)
+        finally:
+            wally_psbt_free(psbt)
+
+    def test_kernel_stealthkey_setter_rejects_bad_length(self):
+        raw = _build_psbt_with_mweb_kernel(stealth_key=None)
+        psbt = self.parse_bytes(raw)
+        try:
+            kernel_ptr = psbt.contents.mweb_kernels
+            for bad_len in (1, 16, 31, 33, 64):
+                buf, buf_len = make_cbuffer('aa' * bad_len)
+                self.assertEqual(WALLY_EINVAL,
+                    wally_psbt_kernel_set_mweb_presign_stealth_key(kernel_ptr, buf, buf_len))
+        finally:
+            wally_psbt_free(psbt)
+
+    def test_kernel_stealthkey_null_kernel(self):
+        buf, buf_len = make_cbuffer('00' * SCALAR_LEN)
+        ret, _ = wally_psbt_kernel_get_mweb_presign_stealth_key(None, buf, buf_len)
+        self.assertEqual(ret, WALLY_EINVAL)
+        self.assertEqual(WALLY_EINVAL,
+            wally_psbt_kernel_set_mweb_presign_stealth_key(None, buf, buf_len))
+
+    def test_kernel_stealthkey_getter_rejects_bad_buffer_len(self):
+        # Symmetric to test_output_senderkey_getter_rejects_bad_buffer_len:
+        # the getter is length-strict even when the field is present.
+        raw = _build_psbt_with_mweb_kernel()
+        psbt = self.parse_bytes(raw)
+        try:
+            kernel_ptr = psbt.contents.mweb_kernels
+            for bad_len in (0, 31, 33, 64):
+                buf, _ = make_cbuffer('00' * max(bad_len, 1))
+                ret, _written = wally_psbt_kernel_get_mweb_presign_stealth_key(
+                    kernel_ptr, buf, bad_len)
+                self.assertEqual(ret, WALLY_EINVAL)
+        finally:
+            wally_psbt_free(psbt)
+
+    def test_kernel_stealthkey_rejects_malformed_value_len(self):
+        # Symmetric to test_output_senderkey_rejects_malformed_value_len:
+        # a PSBT whose kernel proprietary value has a non-32B length must
+        # be rejected by the getter. Build the PSBT manually so we can
+        # inject a 31-byte value under the canonical 7-byte JADE key.
+        magic = b'psbt\xff'
+        globals_bytes = (
+            _varbuff(bytes([0xfb])) + _varbuff((2).to_bytes(4, 'little'))
+          + _varbuff(bytes([0x02])) + _varbuff((2).to_bytes(4, 'little'))
+          + _varbuff(bytes([0x04])) + _varbuff(bytes([0x00]))
+          + _varbuff(bytes([0x05])) + _varbuff(bytes([0x01]))
+          + _varbuff(bytes([0x92])) + _varbuff(bytes([0x01]))
+          + bytes([0x00])
+        )
+        output_bytes = (
+            _varbuff(bytes([0x03])) + _varbuff((1).to_bytes(8, 'little'))
+          + _varbuff(bytes([0x04])) + _varbuff(bytes([0x51]))
+          + bytes([0x00])
+        )
+        bad_value = bytes([0xbb] * 31)
+        kernel_bytes = (
+            _varbuff(KRN_JADE_KEY) + _varbuff(bad_value)
+          + bytes([0x00])
+        )
+        raw = magic + globals_bytes + output_bytes + kernel_bytes
+
+        psbt = self.parse_bytes(raw)
+        try:
+            kernel_ptr = psbt.contents.mweb_kernels
+            buf, buf_len = make_cbuffer('00' * SCALAR_LEN)
+            ret, _ = wally_psbt_kernel_get_mweb_presign_stealth_key(
+                kernel_ptr, buf, buf_len)
+            self.assertEqual(ret, WALLY_EINVAL)
+        finally:
+            wally_psbt_free(psbt)
+
+    def test_strip_clears_only_presign_fields(self):
+        # Fixture: 1 MWEB input (with SPENT_OUTPUT_ID + INPUT_AMOUNT),
+        #          1 MWEB output (with STEALTH_ADDRESS + COMMIT + JADE presign),
+        #          1 MWEB kernel (with JADE presign).
+        raw = _build_psbt_with_mweb_kernel()
+        psbt = self.parse_bytes(raw)
+        try:
+            # --- Pre-strip invariants ---
+            # JADE proprietary fields present.
+            out_buf, out_buf_len = make_cbuffer('00' * SCALAR_LEN)
+            ret, written = wally_psbt_output_get_mweb_presign_sender_key(
+                psbt.contents.outputs[0], out_buf, out_buf_len)
+            self.assertEqual((ret, written), (WALLY_OK, SCALAR_LEN))
+            ret, written = wally_psbt_kernel_get_mweb_presign_stealth_key(
+                psbt.contents.mweb_kernels, out_buf, out_buf_len)
+            self.assertEqual((ret, written), (WALLY_OK, SCALAR_LEN))
+
+            # MWEB_IN_INPUT_AMOUNT (0x97, bit 7 in mweb_keyset) is set and
+            # carries the value we inserted in the fixture.
+            input_amount_bit = 1 << (0x97 - 0x90)
+            self.assertTrue(psbt.contents.inputs[0].mweb_keyset & input_amount_bit)
+            self.assertEqual(psbt.contents.inputs[0].mweb_input_amount,
+                             MWEB_INPUT_AMOUNT)
+
+            # MWEB output carries stealth address (0x90) and commit (0x91).
+            self.assertTrue(psbt.contents.outputs[0].mweb_output_keyset
+                            & (1 << (0x90 - 0x90)))
+            self.assertTrue(psbt.contents.outputs[0].mweb_output_keyset
+                            & (1 << (0x91 - 0x90)))
+
+            # --- Strip ---
+            self.assertEqual(WALLY_OK, wally_psbt_strip_mweb_presign_fields(psbt))
+
+            # --- Post-strip: presign fields gone ---
+            ret, written = wally_psbt_output_get_mweb_presign_sender_key(
+                psbt.contents.outputs[0], out_buf, out_buf_len)
+            self.assertEqual((ret, written), (WALLY_OK, 0))
+            ret, written = wally_psbt_kernel_get_mweb_presign_stealth_key(
+                psbt.contents.mweb_kernels, out_buf, out_buf_len)
+            self.assertEqual((ret, written), (WALLY_OK, 0))
+
+            # MWEB_IN_INPUT_AMOUNT cleared (keyset bit AND value zeroed).
+            self.assertFalse(psbt.contents.inputs[0].mweb_keyset & input_amount_bit)
+            self.assertEqual(psbt.contents.inputs[0].mweb_input_amount, 0)
+
+            # --- Post-strip: MWEB fields that must SURVIVE ---
+            # Standard PSBTv2 amount on the output (0x03).
+            self.assertEqual(psbt.contents.outputs[0].has_amount, 1)
+            self.assertEqual(psbt.contents.outputs[0].amount, 123456789)
+            # MWEB output stealth address (0x90) + commit (0x91).
+            self.assertTrue(psbt.contents.outputs[0].mweb_output_keyset
+                            & (1 << (0x90 - 0x90)))
+            self.assertTrue(psbt.contents.outputs[0].mweb_output_keyset
+                            & (1 << (0x91 - 0x90)))
+            # MWEB input SPENT_OUTPUT_ID (0x90) must survive (only 0x97
+            # is in the strip list).
+            output_id_bit = 1 << (0x90 - 0x90)
+            self.assertTrue(psbt.contents.inputs[0].mweb_keyset & output_id_bit)
+            self.assertEqual(
+                bytes(psbt.contents.inputs[0].mweb_spent_output_id),
+                MWEB_INPUT_OUTPUT_ID)
+
+            # --- Post-strip: wire bytes contain no JADE prefix and still
+            # carry the surviving MWEB fields. ---
+            post_strip = self.serialize(psbt)
+            self.assertNotIn(b'JADE', post_strip)
+            self.assertIn(MWEB_OUT_STEALTH_ADDR, post_strip)
+            self.assertIn(MWEB_OUT_COMMIT, post_strip)
+            self.assertIn(MWEB_INPUT_OUTPUT_ID, post_strip)
+            # The 8 bytes that made up the encoded input amount must NOT
+            # appear any more (the strip helper removed the field).
+            input_amount_le = MWEB_INPUT_AMOUNT.to_bytes(8, 'little')
+            self.assertNotIn(input_amount_le, post_strip)
+        finally:
+            wally_psbt_free(psbt)
+
+    def test_strip_is_noop_when_fields_absent(self):
+        # A PSBT with no JADE presign fields AND no MWEB_IN_INPUT_AMOUNT is
+        # the only shape for which strip is genuinely a no-op. Build that
+        # shape explicitly so the byte-equality assertion is meaningful.
+        raw = _build_psbt_with_mweb_kernel(sender_key=None, stealth_key=None,
+                                           include_input_amount=False)
+        psbt = self.parse_bytes(raw)
+        try:
+            before = self.serialize(psbt)
+            self.assertEqual(WALLY_OK, wally_psbt_strip_mweb_presign_fields(psbt))
+            after = self.serialize(psbt)
+            self.assertEqual(before, after)
+        finally:
+            wally_psbt_free(psbt)
+
+    def test_strip_clears_input_amount_only(self):
+        # PSBT with no JADE fields but WITH MWEB_IN_INPUT_AMOUNT: strip
+        # must clear exactly the input amount and leave everything else.
+        raw = _build_psbt_with_mweb_kernel(sender_key=None, stealth_key=None)
+        psbt = self.parse_bytes(raw)
+        try:
+            input_amount_bit = 1 << (0x97 - 0x90)
+            self.assertTrue(psbt.contents.inputs[0].mweb_keyset & input_amount_bit)
+
+            self.assertEqual(WALLY_OK, wally_psbt_strip_mweb_presign_fields(psbt))
+
+            self.assertFalse(psbt.contents.inputs[0].mweb_keyset & input_amount_bit)
+            self.assertEqual(psbt.contents.inputs[0].mweb_input_amount, 0)
+
+            # SPENT_OUTPUT_ID and the MWEB output fields still present.
+            post_strip = self.serialize(psbt)
+            self.assertIn(MWEB_INPUT_OUTPUT_ID, post_strip)
+            self.assertIn(MWEB_OUT_STEALTH_ADDR, post_strip)
+            self.assertIn(MWEB_OUT_COMMIT, post_strip)
+            self.assertNotIn(MWEB_INPUT_AMOUNT.to_bytes(8, 'little'), post_strip)
+        finally:
+            wally_psbt_free(psbt)
+
+    def test_strip_null_psbt(self):
+        self.assertEqual(WALLY_EINVAL, wally_psbt_strip_mweb_presign_fields(None))
+
+
 if __name__ == '__main__':
     unittest.main()
