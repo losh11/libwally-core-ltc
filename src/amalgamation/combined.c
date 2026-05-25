@@ -13,6 +13,10 @@
 #define ENABLE_MODULE_SURJECTIONPROOF 1
 #define ENABLE_MODULE_WHITELIST 1
 #endif
+#ifdef BUILD_MWEB
+#define ENABLE_MODULE_RANGEPROOF 1
+#define ENABLE_MODULE_BULLETPROOF 1
+#endif
 
 #if (defined(__clang__) || defined(__GNUC__)) && (defined(__x86_64__) || defined(__amd64__))
 #define USE_ASM_X86_64 1
