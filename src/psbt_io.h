@@ -322,9 +322,19 @@
 #define MWEB_OUT_MIN 0x90
 #define MWEB_OUT_MAX 0x98
 
-/* Canonical MWEB output identity: stealth address (0x90) or commit (0x91) */
+/* MWEB output fields. Each has a dedicated first-class slot on
+ * wally_psbt_output; presence is tracked via mweb_output_keyset bits. */
 #define MWEB_OUT_STEALTH_ADDRESS 0x90
 #define MWEB_OUT_COMMIT          0x91
+#define MWEB_OUT_FEATURES        0x92
+#define MWEB_OUT_SENDER_PUBKEY   0x93
+#define MWEB_OUT_OUTPUT_PUBKEY   0x94
+#define MWEB_OUT_STANDARD_FIELDS 0x95
+#define MWEB_OUT_RANGE_PROOF     0x96
+#define MWEB_OUT_SIGNATURE       0x97
+#define MWEB_OUT_EXTRA_DATA      0x98
+
+/* Canonical MWEB output identity: stealth address (0x90) or commit (0x91) */
 #define MWEB_OUT_IS_MWEB(keyset) ((keyset) & ((1u << (MWEB_OUT_STEALTH_ADDRESS - MWEB_OUT_MIN)) | \
                                                (1u << (MWEB_OUT_COMMIT - MWEB_OUT_MIN))))
 

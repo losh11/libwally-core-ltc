@@ -1546,18 +1546,6 @@ inline int psbt_is_input_finalized(const PSBT& psbt, size_t index, size_t* writt
     return detail::check_ret(__FUNCTION__, ret);
 }
 
-template <class KERNEL, class BYTES_OUT>
-inline int psbt_kernel_get_mweb_presign_stealth_key(const KERNEL& kernel, BYTES_OUT& bytes_out, size_t* written) {
-    int ret = ::wally_psbt_kernel_get_mweb_presign_stealth_key(detail::get_p(kernel), bytes_out.data(), bytes_out.size(), written);
-    return detail::check_ret(__FUNCTION__, ret);
-}
-
-template <class KERNEL, class BYTES>
-inline int psbt_kernel_set_mweb_presign_stealth_key(const KERNEL& kernel, const BYTES& bytes) {
-    int ret = ::wally_psbt_kernel_set_mweb_presign_stealth_key(detail::get_p(kernel), bytes.data(), bytes.size());
-    return detail::check_ret(__FUNCTION__, ret);
-}
-
 inline int psbt_output_clear_amount(struct wally_psbt_output* output) {
     int ret = ::wally_psbt_output_clear_amount(output);
     return detail::check_ret(__FUNCTION__, ret);
@@ -1572,12 +1560,6 @@ inline int psbt_output_find_keypath(const OUTPUT& output, const PUB_KEY& pub_key
 template <class OUTPUT, class KEY>
 inline int psbt_output_find_unknown(const OUTPUT& output, const KEY& key, size_t* written) {
     int ret = ::wally_psbt_output_find_unknown(detail::get_p(output), key.data(), key.size(), written);
-    return detail::check_ret(__FUNCTION__, ret);
-}
-
-template <class OUTPUT, class BYTES_OUT>
-inline int psbt_output_get_mweb_presign_sender_key(const OUTPUT& output, BYTES_OUT& bytes_out, size_t* written) {
-    int ret = ::wally_psbt_output_get_mweb_presign_sender_key(detail::get_p(output), bytes_out.data(), bytes_out.size(), written);
     return detail::check_ret(__FUNCTION__, ret);
 }
 
@@ -1596,12 +1578,6 @@ inline int psbt_output_set_amount(const OUTPUT& output, uint64_t amount) {
 template <class OUTPUT>
 inline int psbt_output_set_keypaths(const OUTPUT& output, const struct wally_map* map_in) {
     int ret = ::wally_psbt_output_set_keypaths(detail::get_p(output), map_in);
-    return detail::check_ret(__FUNCTION__, ret);
-}
-
-template <class OUTPUT, class BYTES>
-inline int psbt_output_set_mweb_presign_sender_key(const OUTPUT& output, const BYTES& bytes) {
-    int ret = ::wally_psbt_output_set_mweb_presign_sender_key(detail::get_p(output), bytes.data(), bytes.size());
     return detail::check_ret(__FUNCTION__, ret);
 }
 
@@ -1709,11 +1685,6 @@ inline int psbt_signing_cache_disable(struct wally_psbt* psbt) {
 template <class PSBT>
 inline int psbt_signing_cache_enable(const PSBT& psbt, uint32_t flags) {
     int ret = ::wally_psbt_signing_cache_enable(detail::get_p(psbt), flags);
-    return detail::check_ret(__FUNCTION__, ret);
-}
-
-inline int psbt_strip_mweb_presign_fields(struct wally_psbt* psbt) {
-    int ret = ::wally_psbt_strip_mweb_presign_fields(psbt);
     return detail::check_ret(__FUNCTION__, ret);
 }
 

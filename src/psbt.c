@@ -1159,6 +1159,10 @@ static int psbt_output_free(struct wally_psbt_output *output, bool free_parent)
 #ifdef BUILD_ELEMENTS
         wally_map_clear(&output->pset_fields);
 #endif /* BUILD_ELEMENTS */
+#ifdef BUILD_MWEB
+        clear_and_free(output->mweb_range_proof, output->mweb_range_proof_len);
+        clear_and_free(output->mweb_extra_data, output->mweb_extra_data_len);
+#endif /* BUILD_MWEB */
 
         wally_clear(output, sizeof(*output));
         if (free_parent)
@@ -2804,7 +2808,6 @@ static int pull_psbt_output(const struct wally_psbt *psbt,
                 const uint16_t mweb_obit = (uint16_t)(1u << (raw_field_type - MWEB_OUT_MIN));
                 const unsigned char *mweb_val;
                 size_t mweb_val_len;
-                unsigned char mweb_type_key;
 
                 /* MWEB output fields are disallowed in PSBTv0 */
                 if (psbt->version == PSBT_0 && !(flags & WALLY_PSBT_PARSE_FLAG_LOOSE)) {
@@ -2823,22 +2826,65 @@ static int pull_psbt_output(const struct wally_psbt *psbt,
                     break;
                 }
 
-                /* Read value and validate sizes for identity fields */
                 pull_varlength_buff(cursor, max, &mweb_val, &mweb_val_len);
-                if (raw_field_type == MWEB_OUT_STEALTH_ADDRESS && mweb_val_len != 66) {
-                    ret = WALLY_EINVAL; /* Stealth address must be 66 bytes */
-                    break;
-                }
-                if (raw_field_type == MWEB_OUT_COMMIT && mweb_val_len != EC_PUBLIC_KEY_LEN) {
-                    ret = WALLY_EINVAL; /* Commitment must be 33 bytes */
-                    break;
-                }
 
+                /* Per-field length check + dispatch into the first-class
+                 * struct slot. Mirrors the MWEB input parser pattern. */
+                switch (raw_field_type) {
+                case MWEB_OUT_STEALTH_ADDRESS:
+                    if (mweb_val_len != 66) ret = WALLY_EINVAL;
+                    else memcpy(result->mweb_stealth_address, mweb_val, 66);
+                    break;
+                case MWEB_OUT_COMMIT:
+                    if (mweb_val_len != EC_PUBLIC_KEY_LEN) ret = WALLY_EINVAL;
+                    else memcpy(result->mweb_commit, mweb_val, EC_PUBLIC_KEY_LEN);
+                    break;
+                case MWEB_OUT_FEATURES:
+                    if (mweb_val_len != 1) ret = WALLY_EINVAL;
+                    else result->mweb_features = mweb_val[0];
+                    break;
+                case MWEB_OUT_SENDER_PUBKEY:
+                    if (mweb_val_len != EC_PUBLIC_KEY_LEN) ret = WALLY_EINVAL;
+                    else memcpy(result->mweb_sender_pubkey, mweb_val, EC_PUBLIC_KEY_LEN);
+                    break;
+                case MWEB_OUT_OUTPUT_PUBKEY:
+                    if (mweb_val_len != EC_PUBLIC_KEY_LEN) ret = WALLY_EINVAL;
+                    else memcpy(result->mweb_output_pubkey, mweb_val, EC_PUBLIC_KEY_LEN);
+                    break;
+                case MWEB_OUT_STANDARD_FIELDS:
+                    if (mweb_val_len != 58) ret = WALLY_EINVAL;
+                    else memcpy(result->mweb_standard_fields, mweb_val, 58);
+                    break;
+                case MWEB_OUT_RANGE_PROOF:
+                    /* A range proof is always non-empty on the wire (a
+                     * 64-bit single-commit bulletproof is 675 B). Reject
+                     * a zero-length value at parse so the serializer's
+                     * keyset-bit + pointer gates can't drop it on a
+                     * subsequent round-trip. */
+                    if (!mweb_val_len)
+                        ret = WALLY_EINVAL;
+                    else if (mweb_val)
+                        ret = replace_bytes(mweb_val, mweb_val_len,
+                                            &result->mweb_range_proof,
+                                            &result->mweb_range_proof_len);
+                    break;
+                case MWEB_OUT_SIGNATURE:
+                    if (mweb_val_len != EC_SIGNATURE_LEN) ret = WALLY_EINVAL;
+                    else memcpy(result->mweb_signature, mweb_val, EC_SIGNATURE_LEN);
+                    break;
+                case MWEB_OUT_EXTRA_DATA:
+                    if (mweb_val_len && mweb_val)
+                        ret = replace_bytes(mweb_val, mweb_val_len,
+                                            &result->mweb_extra_data,
+                                            &result->mweb_extra_data_len);
+                    break;
+                default:
+                    ret = WALLY_EINVAL;
+                    break;
+                }
+                if (ret != WALLY_OK)
+                    break;
                 result->mweb_output_keyset |= mweb_obit;
-                /* Store in unknowns: key is the single type byte */
-                mweb_type_key = (unsigned char)raw_field_type;
-                ret = map_add(&result->unknowns, &mweb_type_key, 1,
-                              mweb_val, mweb_val_len, false, false);
                 pre_key = *cursor;
                 continue;
             }
@@ -3290,6 +3336,21 @@ static void push_psbt_varbuff(unsigned char **cursor, size_t *max,
     }
 }
 
+#ifdef BUILD_MWEB
+/* Like push_psbt_varbuff, but emits the field unconditionally — i.e. a
+ * present-but-empty varbuff (NULL pointer + zero length) yields key +
+ * varint(0). Used by MWEB extra_data, where the on-wire format allows
+ * a key with an empty payload; the standard helper's NULL-pointer
+ * gate would otherwise drop those on a parse → serialize round-trip. */
+static void push_psbt_varbuff_always(unsigned char **cursor, size_t *max,
+                                     uint64_t type, bool is_pset,
+                                     const unsigned char *bytes, size_t bytes_len)
+{
+    push_key(cursor, max, type, is_pset, NULL, 0);
+    push_varbuff(cursor, max, bytes, bytes_len);
+}
+#endif /* BUILD_MWEB */
+
 static void push_psbt_le32(unsigned char **cursor, size_t *max,
                            uint64_t type, bool is_pset, uint32_t value)
 {
@@ -3673,7 +3734,7 @@ static int push_psbt_input(const struct wally_psbt *psbt,
             push_psbt_varbuff(cursor, max, MWEB_IN_INPUT_SIGNATURE, false,
                               input->mweb_input_signature, EC_SIGNATURE_LEN);
 
-        /* Presign-only fields: only when signature is NOT present */
+        /* Unsigned-only fields: only when signature is NOT present */
         if (!has_sig) {
             if (MWEB_HAS(input->mweb_keyset, MWEB_IN_ADDRESS_INDEX))
                 push_psbt_le32(cursor, max, MWEB_IN_ADDRESS_INDEX, false, input->mweb_address_index);
@@ -3693,10 +3754,12 @@ static int push_psbt_input(const struct wally_psbt *psbt,
                               &input->mweb_spend_key_origin);
         }
 
-        /* Extra data */
-        if (input->mweb_extra_data)
-            push_psbt_varbuff(cursor, max, MWEB_IN_EXTRA_DATA, false,
-                              input->mweb_extra_data, input->mweb_extra_data_len);
+        /* Extra data: gate on the keyset bit (not the pointer) so a
+         * present-but-empty payload round-trips faithfully. */
+        if (MWEB_HAS(input->mweb_keyset, MWEB_IN_EXTRA_DATA))
+            push_psbt_varbuff_always(cursor, max, MWEB_IN_EXTRA_DATA, false,
+                                     input->mweb_extra_data,
+                                     input->mweb_extra_data_len);
     }
 #undef MWEB_HAS
 #endif /* BUILD_MWEB */
@@ -3828,6 +3891,47 @@ static int push_psbt_output(const struct wally_psbt *psbt,
         }
     }
 #endif /* BUILD_ELEMENTS */
+
+#ifdef BUILD_MWEB
+#define MWEB_HAS_OUT(ks, field) ((ks) & (1u << ((field) - MWEB_OUT_MIN)))
+    if (output->mweb_output_keyset) {
+        if (MWEB_HAS_OUT(output->mweb_output_keyset, MWEB_OUT_STEALTH_ADDRESS))
+            push_psbt_varbuff(cursor, max, MWEB_OUT_STEALTH_ADDRESS, false,
+                              output->mweb_stealth_address, 66);
+        if (MWEB_HAS_OUT(output->mweb_output_keyset, MWEB_OUT_COMMIT))
+            push_psbt_varbuff(cursor, max, MWEB_OUT_COMMIT, false,
+                              output->mweb_commit, EC_PUBLIC_KEY_LEN);
+        if (MWEB_HAS_OUT(output->mweb_output_keyset, MWEB_OUT_FEATURES)) {
+            push_psbt_key(cursor, max, MWEB_OUT_FEATURES, NULL, 0);
+            push_varint(cursor, max, sizeof(uint8_t));
+            push_u8(cursor, max, output->mweb_features);
+        }
+        if (MWEB_HAS_OUT(output->mweb_output_keyset, MWEB_OUT_SENDER_PUBKEY))
+            push_psbt_varbuff(cursor, max, MWEB_OUT_SENDER_PUBKEY, false,
+                              output->mweb_sender_pubkey, EC_PUBLIC_KEY_LEN);
+        if (MWEB_HAS_OUT(output->mweb_output_keyset, MWEB_OUT_OUTPUT_PUBKEY))
+            push_psbt_varbuff(cursor, max, MWEB_OUT_OUTPUT_PUBKEY, false,
+                              output->mweb_output_pubkey, EC_PUBLIC_KEY_LEN);
+        if (MWEB_HAS_OUT(output->mweb_output_keyset, MWEB_OUT_STANDARD_FIELDS))
+            push_psbt_varbuff(cursor, max, MWEB_OUT_STANDARD_FIELDS, false,
+                              output->mweb_standard_fields, 58);
+        if (MWEB_HAS_OUT(output->mweb_output_keyset, MWEB_OUT_RANGE_PROOF)
+            && output->mweb_range_proof)
+            push_psbt_varbuff(cursor, max, MWEB_OUT_RANGE_PROOF, false,
+                              output->mweb_range_proof,
+                              output->mweb_range_proof_len);
+        if (MWEB_HAS_OUT(output->mweb_output_keyset, MWEB_OUT_SIGNATURE))
+            push_psbt_varbuff(cursor, max, MWEB_OUT_SIGNATURE, false,
+                              output->mweb_signature, EC_SIGNATURE_LEN);
+        /* Extra data: gate on the keyset bit (not the pointer) so a
+         * present-but-empty payload round-trips faithfully. */
+        if (MWEB_HAS_OUT(output->mweb_output_keyset, MWEB_OUT_EXTRA_DATA))
+            push_psbt_varbuff_always(cursor, max, MWEB_OUT_EXTRA_DATA, false,
+                                     output->mweb_extra_data,
+                                     output->mweb_extra_data_len);
+    }
+#undef MWEB_HAS_OUT
+#endif /* BUILD_MWEB */
 
     /* Unknowns */
     push_map(cursor, max, &output->unknowns);
@@ -4249,7 +4353,6 @@ static int combine_input(struct wally_psbt_input *dst,
         }
         MWEB_MERGE(dks, MWEB_IN_SHARED_SECRET, dst->mweb_shared_secret, src->mweb_shared_secret, WALLY_TXHASH_LEN);
         MWEB_MERGE(dks, MWEB_IN_KEY_EXCHANGE_PUBKEY, dst->mweb_key_exchange_pubkey, src->mweb_key_exchange_pubkey, EC_PUBLIC_KEY_LEN);
-        dst->mweb_keyset = dks;
 
         /* Singular keypath fields: copy only if dst is empty, reject if both
          * have entries with different content (would create invalid duplicates) */
@@ -4276,9 +4379,16 @@ static int combine_input(struct wally_psbt_input *dst,
                 || d->value_len != s->value_len || memcmp(d->value, s->value, d->value_len))
                 ret = WALLY_EINVAL; /* Mismatched singular keypath */
         }
-        if (ret == WALLY_OK && !dst->mweb_extra_data && src->mweb_extra_data)
+        /* Heap-owned extra_data: clone src bytes when dst is empty, and
+         * OR the keyset bit so callers reading mweb_keyset see the field
+         * as present. Mirrors the parallel fix in combine_output. */
+        if (ret == WALLY_OK && !dst->mweb_extra_data && src->mweb_extra_data) {
             ret = replace_bytes(src->mweb_extra_data, src->mweb_extra_data_len,
                                 &dst->mweb_extra_data, &dst->mweb_extra_data_len);
+            if (ret == WALLY_OK)
+                dks |= (1u << (MWEB_IN_EXTRA_DATA - MWEB_IN_MIN));
+        }
+        dst->mweb_keyset = dks;
     }
 #undef MWEB_MERGE
 #endif /* BUILD_MWEB */
@@ -4340,8 +4450,47 @@ static int combine_output(struct wally_psbt_output *dst,
     if (ret == WALLY_OK)
         ret = wally_map_combine(&dst->unknowns, &src->unknowns);
 #ifdef BUILD_MWEB
-    dst->mweb_output_keyset |= src->mweb_output_keyset;
-#endif
+#define MWEB_MERGE_OUT(ks, field, dst_f, src_f, sz) do { \
+    if (!((ks) & (1u << ((field) - MWEB_OUT_MIN))) && \
+        (src->mweb_output_keyset & (1u << ((field) - MWEB_OUT_MIN)))) { \
+        memcpy(dst_f, src_f, sz); \
+        (ks) |= (1u << ((field) - MWEB_OUT_MIN)); \
+    } \
+} while(0)
+    if (ret == WALLY_OK && src->mweb_output_keyset) {
+        uint16_t dks = dst->mweb_output_keyset;
+        MWEB_MERGE_OUT(dks, MWEB_OUT_STEALTH_ADDRESS, dst->mweb_stealth_address, src->mweb_stealth_address, 66);
+        MWEB_MERGE_OUT(dks, MWEB_OUT_COMMIT, dst->mweb_commit, src->mweb_commit, EC_PUBLIC_KEY_LEN);
+        if (!(dks & (1u << (MWEB_OUT_FEATURES - MWEB_OUT_MIN))) &&
+            (src->mweb_output_keyset & (1u << (MWEB_OUT_FEATURES - MWEB_OUT_MIN)))) {
+            dst->mweb_features = src->mweb_features;
+            dks |= (1u << (MWEB_OUT_FEATURES - MWEB_OUT_MIN));
+        }
+        MWEB_MERGE_OUT(dks, MWEB_OUT_SENDER_PUBKEY, dst->mweb_sender_pubkey, src->mweb_sender_pubkey, EC_PUBLIC_KEY_LEN);
+        MWEB_MERGE_OUT(dks, MWEB_OUT_OUTPUT_PUBKEY, dst->mweb_output_pubkey, src->mweb_output_pubkey, EC_PUBLIC_KEY_LEN);
+        MWEB_MERGE_OUT(dks, MWEB_OUT_STANDARD_FIELDS, dst->mweb_standard_fields, src->mweb_standard_fields, 58);
+        MWEB_MERGE_OUT(dks, MWEB_OUT_SIGNATURE, dst->mweb_signature, src->mweb_signature, EC_SIGNATURE_LEN);
+
+        /* Heap fields: clone src bytes when dst is empty, and OR the
+         * keyset bit so the serializer (which gates on the bit) re-emits
+         * the field. The fixed-size MWEB_MERGE_OUT pattern above sets
+         * bits implicitly via macro; heap fields need it spelled out. */
+        if (ret == WALLY_OK && !dst->mweb_range_proof && src->mweb_range_proof) {
+            ret = replace_bytes(src->mweb_range_proof, src->mweb_range_proof_len,
+                                &dst->mweb_range_proof, &dst->mweb_range_proof_len);
+            if (ret == WALLY_OK)
+                dks |= (1u << (MWEB_OUT_RANGE_PROOF - MWEB_OUT_MIN));
+        }
+        if (ret == WALLY_OK && !dst->mweb_extra_data && src->mweb_extra_data) {
+            ret = replace_bytes(src->mweb_extra_data, src->mweb_extra_data_len,
+                                &dst->mweb_extra_data, &dst->mweb_extra_data_len);
+            if (ret == WALLY_OK)
+                dks |= (1u << (MWEB_OUT_EXTRA_DATA - MWEB_OUT_MIN));
+        }
+        dst->mweb_output_keyset = dks;
+    }
+#undef MWEB_MERGE_OUT
+#endif /* BUILD_MWEB */
     if (ret == WALLY_OK)
         ret = wally_map_combine(&dst->psbt_fields, &src->psbt_fields);
     if (ret == WALLY_OK)
@@ -6752,147 +6901,3 @@ int wally_psbt_get_output_blinding_status(const struct wally_psbt *psbt, size_t 
 #undef MAX_INVALID_SATOSHI
 #endif /* WALLY_ABI_NO_ELEMENTS */
 
-#ifdef BUILD_MWEB
-/* Build the 7-byte proprietary key bytes for a Jade MWEB presign field:
- *   [0xFC] [varint(4)=0x04] ['J' 'A' 'D' 'E'] [varint(subtype)]
- * `subtype` is assumed to be a single-byte varint (< 0xFD), which is
- * currently the case for all defined subtypes (0x01, 0x02). */
-#define MWEB_PRESIGN_KEY_LEN 7u
-static void build_mweb_presign_key(uint8_t subtype, unsigned char out[MWEB_PRESIGN_KEY_LEN])
-{
-    out[0] = WALLY_PSBT_PROPRIETARY_TYPE;
-    out[1] = WALLY_PSBT_MWEB_PRESIGN_PREFIX_LEN;
-    out[2] = 'J';
-    out[3] = 'A';
-    out[4] = 'D';
-    out[5] = 'E';
-    out[6] = subtype;
-}
-
-static int mweb_presign_get(const struct wally_map *unknowns, uint8_t subtype,
-                            unsigned char *bytes_out, size_t len, size_t *written)
-{
-    unsigned char key[MWEB_PRESIGN_KEY_LEN];
-    const struct wally_map_item *item;
-
-    if (written) *written = 0;
-    if (!unknowns || !bytes_out || len != WALLY_PSBT_MWEB_PRESIGN_SCALAR_LEN || !written)
-        return WALLY_EINVAL;
-
-    build_mweb_presign_key(subtype, key);
-    item = wally_map_get(unknowns, key, MWEB_PRESIGN_KEY_LEN);
-    if (!item)
-        return WALLY_OK; /* Absent; *written stays 0 */
-    if (item->value_len != WALLY_PSBT_MWEB_PRESIGN_SCALAR_LEN)
-        return WALLY_EINVAL;
-    memcpy(bytes_out, item->value, WALLY_PSBT_MWEB_PRESIGN_SCALAR_LEN);
-    *written = WALLY_PSBT_MWEB_PRESIGN_SCALAR_LEN;
-    return WALLY_OK;
-}
-
-static int mweb_presign_set(struct wally_map *unknowns, uint8_t subtype,
-                            const unsigned char *bytes, size_t bytes_len)
-{
-    unsigned char key[MWEB_PRESIGN_KEY_LEN];
-
-    if (!unknowns)
-        return WALLY_EINVAL;
-    if (bytes_len == 0)
-        bytes = NULL;
-    if (bytes_len != 0 && (!bytes || bytes_len != WALLY_PSBT_MWEB_PRESIGN_SCALAR_LEN))
-        return WALLY_EINVAL;
-
-    build_mweb_presign_key(subtype, key);
-    if (!bytes)
-        return wally_map_remove(unknowns, key, MWEB_PRESIGN_KEY_LEN);
-    return wally_map_replace(unknowns, key, MWEB_PRESIGN_KEY_LEN, bytes, bytes_len);
-}
-
-int wally_psbt_output_get_mweb_presign_sender_key(
-    const struct wally_psbt_output *output,
-    unsigned char *bytes_out, size_t len, size_t *written)
-{
-    if (!output) {
-        if (written) *written = 0;
-        return WALLY_EINVAL;
-    }
-    return mweb_presign_get(&output->unknowns,
-                            WALLY_PSBT_MWEB_PRESIGN_OUT_SENDER_KEY,
-                            bytes_out, len, written);
-}
-
-int wally_psbt_output_set_mweb_presign_sender_key(
-    struct wally_psbt_output *output,
-    const unsigned char *bytes, size_t bytes_len)
-{
-    if (!output)
-        return WALLY_EINVAL;
-    return mweb_presign_set(&output->unknowns,
-                            WALLY_PSBT_MWEB_PRESIGN_OUT_SENDER_KEY,
-                            bytes, bytes_len);
-}
-
-int wally_psbt_kernel_get_mweb_presign_stealth_key(
-    const struct wally_psbt_kernel *kernel,
-    unsigned char *bytes_out, size_t len, size_t *written)
-{
-    if (!kernel) {
-        if (written) *written = 0;
-        return WALLY_EINVAL;
-    }
-    return mweb_presign_get(&kernel->unknowns,
-                            WALLY_PSBT_MWEB_PRESIGN_KRN_STEALTH_KEY,
-                            bytes_out, len, written);
-}
-
-int wally_psbt_kernel_set_mweb_presign_stealth_key(
-    struct wally_psbt_kernel *kernel,
-    const unsigned char *bytes, size_t bytes_len)
-{
-    if (!kernel)
-        return WALLY_EINVAL;
-    return mweb_presign_set(&kernel->unknowns,
-                            WALLY_PSBT_MWEB_PRESIGN_KRN_STEALTH_KEY,
-                            bytes, bytes_len);
-}
-
-int wally_psbt_strip_mweb_presign_fields(struct wally_psbt *psbt)
-{
-    size_t i;
-    int ret;
-    unsigned char sender_key[MWEB_PRESIGN_KEY_LEN];
-    unsigned char stealth_key[MWEB_PRESIGN_KEY_LEN];
-
-    if (!psbt)
-        return WALLY_EINVAL;
-
-    build_mweb_presign_key(WALLY_PSBT_MWEB_PRESIGN_OUT_SENDER_KEY, sender_key);
-    build_mweb_presign_key(WALLY_PSBT_MWEB_PRESIGN_KRN_STEALTH_KEY, stealth_key);
-
-    for (i = 0; i < psbt->num_outputs; ++i) {
-        ret = wally_map_remove(&psbt->outputs[i].unknowns,
-                               sender_key, MWEB_PRESIGN_KEY_LEN);
-        if (ret != WALLY_OK)
-            return ret;
-    }
-
-    for (i = 0; i < psbt->num_mweb_kernels; ++i) {
-        ret = wally_map_remove(&psbt->mweb_kernels[i].unknowns,
-                               stealth_key, MWEB_PRESIGN_KEY_LEN);
-        if (ret != WALLY_OK)
-            return ret;
-    }
-
-    for (i = 0; i < psbt->num_inputs; ++i) {
-        struct wally_psbt_input *inp = &psbt->inputs[i];
-        const uint16_t amount_bit = (uint16_t)(1u << (MWEB_IN_INPUT_AMOUNT - MWEB_IN_MIN));
-        if (inp->mweb_keyset & amount_bit) {
-            inp->mweb_input_amount = 0;
-            inp->mweb_keyset &= (uint16_t)~amount_bit;
-        }
-    }
-
-    return WALLY_OK;
-}
-#undef MWEB_PRESIGN_KEY_LEN
-#endif /* BUILD_MWEB */
